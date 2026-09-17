@@ -1,0 +1,21 @@
+{
+  "id": "cli:agent:get",
+  "result": {
+    "agent": {
+      "agent": "pi",
+      "agent_status": "idle",
+      "cwd": "/home/example/Projects/alpha",
+      "focused": false,
+      "foreground_cwd": "/home/example/Projects/alpha",
+      "pane_id": "w1:p1",
+      "revision": 1,
+      "state_change_seq": 161,
+      "tab_id": "w1:t1",
+      "terminal_id": "term_65b8279e0bf011",
+      "terminal_title": "π - alpha",
+      "terminal_title_stripped": "π - alpha",
+      "workspace_id": "w1"
+    },
+    "type": "agent_info"
+  }
+}

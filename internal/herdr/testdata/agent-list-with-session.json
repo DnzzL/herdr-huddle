@@ -1,0 +1,26 @@
+{
+  "id": "cli:agent:list",
+  "result": {
+    "agents": [
+      {
+        "agent": "claude",
+        "agent_status": "working",
+        "cwd": "/home/example/Projects/beta",
+        "focused": true,
+        "foreground_cwd": "/home/example/Projects/beta",
+        "pane_id": "w2:p1",
+        "revision": 4,
+        "state_change_seq": 268,
+        "tab_id": "w2:t1",
+        "terminal_id": "term_65b9afb8a637815",
+        "terminal_title": "claude - beta",
+        "terminal_title_stripped": "claude - beta",
+        "workspace_id": "w2",
+        "agent_session": {
+          "value": "2f1c0b7e-9a44-4a1e-9f0d-6c2b8f5a1d30"
+        }
+      }
+    ],
+    "type": "agent_list"
+  }
+}
