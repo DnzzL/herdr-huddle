@@ -17,6 +17,9 @@
         "terminal_title_stripped": "claude - beta",
         "workspace_id": "w2",
         "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "claude-code-hook",
           "value": "2f1c0b7e-9a44-4a1e-9f0d-6c2b8f5a1d30"
         }
       }

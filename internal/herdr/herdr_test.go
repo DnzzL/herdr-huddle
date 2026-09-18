@@ -65,8 +65,15 @@ func TestAgents_ParsesListResponse(t *testing.T) {
 	}
 
 	first := agents[0]
-	if first.Name != "pi" {
-		t.Errorf("Name = %q, want pi", first.Name)
+	// "agent" is the identity, not a targetable name. On a live session this
+	// field reads "pi", and `herdr agent get pi` answers agent_not_found.
+	if first.Agent != "pi" {
+		t.Errorf("Agent = %q, want pi", first.Agent)
+	}
+	// A detected agent has no name until it is named, and herdr omits the key
+	// entirely rather than sending null.
+	if first.Name != "" {
+		t.Errorf("Name = %q, want empty for an unnamed agent", first.Name)
 	}
 	if first.Status != "idle" {
 		t.Errorf("Status = %q, want idle", first.Status)
@@ -83,10 +90,19 @@ func TestAgents_ParsesListResponse(t *testing.T) {
 	if first.TerminalTitle != "π - alpha" {
 		t.Errorf("TerminalTitle = %q", first.TerminalTitle)
 	}
-	// Herdr only reports a session for agent kinds it can identify, and `pi` is
-	// not one of them. Absence must decode to nil, not to a zero-value session.
+	// Herdr only reports a session for agents an integration reported one for,
+	// so absence must decode to nil rather than to a zero-value session.
 	if first.Session != nil {
 		t.Errorf("Session = %+v, want nil for an agent with no agent_session", first.Session)
+	}
+
+	// A started agent has both a name and an identity, and they differ.
+	second := agents[1]
+	if second.Name != "reviewer" {
+		t.Errorf("Name = %q, want reviewer", second.Name)
+	}
+	if second.Agent != "claude" {
+		t.Errorf("Agent = %q, want claude", second.Agent)
 	}
 }
 
@@ -104,8 +120,43 @@ func TestAgents_DecodesAgentSession(t *testing.T) {
 	if agents[0].Session == nil {
 		t.Fatal("Session is nil, want the decoded agent_session")
 	}
-	if got := agents[0].Session.Value; got != "2f1c0b7e-9a44-4a1e-9f0d-6c2b8f5a1d30" {
+	sess := agents[0].Session
+	if got := sess.Value; got != "2f1c0b7e-9a44-4a1e-9f0d-6c2b8f5a1d30" {
 		t.Errorf("Session.Value = %q", got)
+	}
+	// Kind is what decides how Value is read, so decoding it wrong silently
+	// turns a session id into a filename.
+	if sess.Kind != SessionKindID {
+		t.Errorf("Session.Kind = %q, want %q", sess.Kind, SessionKindID)
+	}
+	if sess.Agent != "claude" {
+		t.Errorf("Session.Agent = %q, want claude", sess.Agent)
+	}
+	if sess.Source != "claude-code-hook" {
+		t.Errorf("Session.Source = %q", sess.Source)
+	}
+}
+
+// The server schema allows kind to be "path", in which case Value already
+// locates the transcript and no searching is needed.
+func TestAgents_DecodesPathKindSession(t *testing.T) {
+	stdout := `{"id":"cli:agent:list","result":{"agents":[{"agent":"claude","pane_id":"w3:p1",
+		"agent_session":{"agent":"claude","kind":"path","source":"claude-code-hook",
+		"value":"/home/example/.claude/projects/-home-example-proj/sess.jsonl"}}],"type":"agent_list"}}`
+	r := &fakeRunner{stdout: stdout}
+	agents, err := newTestClient(r).Agents(context.Background())
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	sess := agents[0].Session
+	if sess == nil {
+		t.Fatal("Session is nil")
+	}
+	if sess.Kind != SessionKindPath {
+		t.Errorf("Kind = %q, want %q", sess.Kind, SessionKindPath)
+	}
+	if !strings.HasSuffix(sess.Value, ".jsonl") {
+		t.Errorf("Value = %q, want a transcript path", sess.Value)
 	}
 }
 
@@ -150,7 +201,7 @@ func TestAgent_ParsesGetResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Agent: %v", err)
 	}
-	if agent.Name != "pi" || agent.PaneID != "w1:p1" {
+	if agent.Agent != "pi" || agent.PaneID != "w1:p1" {
 		t.Errorf("got %+v", agent)
 	}
 	if got := r.lastArgs(); strings.Join(got, " ") != "herdr agent get w1:p1" {

@@ -30,7 +30,9 @@
         "terminal_id": "term_65b9afb8a637815",
         "terminal_title": "claude - beta",
         "terminal_title_stripped": "claude - beta",
-        "workspace_id": "w2"
+        "workspace_id": "w2",
+        "name": "reviewer",
+        "display_agent": "reviewer"
       }
     ],
     "type": "agent_list"

@@ -65,14 +65,20 @@ func (ExecRunner) Run(ctx context.Context, name string, args []string, env []str
 	return nil, nil, -1, err
 }
 
-// Agent is one entry from `herdr agent list`.
+// Agent is one entry from `herdr agent list`, as defined by the server's own
+// schema (`herdr api schema`, AgentInfo).
 //
-// Herdr reports the live agent name in a field called "agent". The name
-// defaults to the agent kind when the pane's agent has not been renamed, so a
-// value of "pi" or "claude" is a name, not a kind. The API does not expose the
-// kind separately, so this package does not invent one.
+// The three name-ish fields are easy to confuse and the difference matters:
+// "agent" is the agent's identity, which for a detected (rather than started)
+// agent is its kind; "name" is the live agent name that can be used as a
+// command target, and is absent until the agent is named; "display_agent" is
+// for presentation. Targeting by the "agent" field does not work: on a live
+// session `herdr agent get pi` returns agent_not_found, because `pi` is a kind
+// and not a name. Always prefer PaneID, which the schema marks required.
 type Agent struct {
-	Name          string        `json:"agent"`
+	Agent         string        `json:"agent"`
+	Name          string        `json:"name"`
+	DisplayAgent  string        `json:"display_agent"`
 	Status        string        `json:"agent_status"`
 	CWD           string        `json:"cwd"`
 	PaneID        string        `json:"pane_id"`
@@ -82,13 +88,34 @@ type Agent struct {
 	Session       *AgentSession `json:"agent_session"`
 }
 
-// AgentSession identifies the agent's own session, and is the primary source for
-// the transcript. Herdr reports it only for kinds it can identify; it is nil for
-// the rest, which is why callers must have a way to fall back.
+// AgentSessionKind says how to read AgentSession.Value, which is the whole
+// point of the field. Both values are documented by the server's schema in an
+// enum called AgentSessionRefKind.
+type AgentSessionKind string
+
+const (
+	// SessionKindID means Value is a session identifier, so the caller has to
+	// find the transcript itself.
+	SessionKindID AgentSessionKind = "id"
+	// SessionKindPath means Value is already the location of the session's
+	// transcript, and no searching is needed.
+	SessionKindPath AgentSessionKind = "path"
+)
+
+// AgentSession identifies the agent's own session, and is the primary source
+// for the transcript. Herdr reports it only when an integration has reported it
+// (see the pane.report_agent_session API method), so it is absent for agents
+// Herdr can only detect. Callers must therefore always have a fallback.
 //
-// Only "value" is modelled: it is the one field that observed responses and the
-// ADR agree on. Any sibling fields are ignored on purpose.
+// All four fields are required by the schema. Nothing here is inferred.
 type AgentSession struct {
+	// Agent is the agent this session belongs to.
+	Agent string `json:"agent"`
+	// Kind says whether Value is an id or a path.
+	Kind AgentSessionKind `json:"kind"`
+	// Source names the integration that reported the session.
+	Source string `json:"source"`
+	// Value is the session id or transcript path, per Kind.
 	Value string `json:"value"`
 }
 
