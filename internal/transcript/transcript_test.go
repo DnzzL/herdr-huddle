@@ -541,3 +541,103 @@ func TestGuardrail_SystemPromptAndInstructionsNeverRendered(t *testing.T) {
 		t.Errorf("IncludeThinking must not drag system content in:\n%s", withThinking)
 	}
 }
+
+// Credential formats that show up in real tool output. Each one is a shape a
+// tool result can plausibly contain, because reading config files and running
+// `env` are the two most common things an agent does.
+func TestRedact_CoversCommonCredentialFormats(t *testing.T) {
+	rep := func(s string, n int) string { return strings.Repeat(s, n) }
+
+	secrets := map[string]string{
+		"google api key":        "AIza" + rep("a", 35),
+		"google oauth secret":   "GOCSPX-" + rep("b", 28),
+		"stripe live key":       "sk_live_" + rep("c", 24),
+		"stripe restricted key": "rk_live_" + rep("d", 24),
+		"stripe webhook secret": "whsec_" + rep("e", 24),
+		"gitlab pat":            "glpat-" + rep("f", 20),
+		"npm token":             "npm_" + rep("g", 36),
+		"pypi token":            "pypi-AgEIcHlwaS5vcmc" + rep("h", 30),
+		"huggingface token":     "hf_" + rep("i", 34),
+		"digitalocean token":    "dop_v1_" + rep("a1", 32),
+		"sendgrid key":          "SG." + rep("j", 22) + "." + rep("k", 43),
+		"slack webhook":         "https://hooks.slack.com/services/" + rep("l", 24),
+		"slack session cookie":  "xoxc-" + rep("m", 20),
+		"azure account key":     "AccountKey=" + rep("n", 44) + "==",
+	}
+
+	for name, secret := range secrets {
+		t.Run(name, func(t *testing.T) {
+			got := Redact("before " + secret + " after")
+			if strings.Contains(got, secret) {
+				t.Errorf("secret survived redaction: %s", got)
+			}
+			if !strings.Contains(got, "REDACTED") {
+				t.Errorf("nothing was redacted: %s", got)
+			}
+			if !strings.Contains(got, "before") || !strings.Contains(got, "after") {
+				t.Errorf("surrounding text was destroyed: %s", got)
+			}
+		})
+	}
+}
+
+// A JSON config dump is the most likely place for a credential to appear, and
+// the line-anchored env rule does not match it: the key is quoted, so the
+// pattern never reaches the identifier.
+func TestRedact_HandlesQuotedJSONKeys(t *testing.T) {
+	in := `{"database": {"password": "hunter2", "host": "db.internal"}, "api_key": "abc123xyz"}`
+	got := Redact(in)
+	for _, secret := range []string{"hunter2", "abc123xyz"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("secret %q survived: %s", secret, got)
+		}
+	}
+	// The non-secret parts of the same document must survive, or redaction has
+	// destroyed the evidence the transcript exists to carry.
+	for _, keep := range []string{"db.internal", "database", "host"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("redaction removed ordinary content %q: %s", keep, got)
+		}
+	}
+}
+
+func TestRedact_HandlesEnvDump(t *testing.T) {
+	in := strings.Join([]string{
+		`AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`,
+		`DATABASE_URL=postgres://app:s3cr3t@db.internal:5432/app`,
+		`STRIPE_SECRET_KEY=sk_live_abcdefghijklmnopqrstuvwx`,
+		`GITHUB_TOKEN=ghp_` + strings.Repeat("z", 36),
+		`POSTGRES_HOST=db.internal`,
+		`LOG_LEVEL=debug`,
+	}, "\n")
+
+	got := Redact(in)
+	for _, secret := range []string{"wJalrXUtnFEMI", "s3cr3t", "sk_live_ab", "ghp_zzz"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("secret %q survived:\n%s", secret, got)
+		}
+	}
+	for _, keep := range []string{"POSTGRES_HOST=db.internal", "LOG_LEVEL=debug"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("ordinary setting %q was destroyed:\n%s", keep, got)
+		}
+	}
+}
+
+// Redaction has to be safe to run twice: Render applies it to the whole
+// document, and a caller may apply it again before pushing.
+func TestRedact_IsIdempotentAcrossAllPatterns(t *testing.T) {
+	in := strings.Join([]string{
+		`AIza` + strings.Repeat("a", 35),
+		`{"password": "hunter2"}`,
+		`DATABASE_URL=postgres://app:s3cr3t@db.internal/app`,
+		`Authorization: Bearer ` + strings.Repeat("A", 40),
+		`glpat-` + strings.Repeat("f", 20),
+	}, "\n")
+
+	once := Redact(in)
+	twice := Redact(once)
+	if once != twice {
+		t.Errorf("redaction is not idempotent\n--- once ---\n%s\n--- twice ---\n%s", once, twice)
+	}
+}

@@ -439,23 +439,85 @@ func oneLine(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// secretKeyWords are the substrings that make an identifier look like it holds a
+// credential. Shared by the two keyed rules below, which differ only in how they
+// reach the key: one from the start of a line (an env file or shell dump), one
+// from a quote anywhere in a line (a JSON document, where the key of interest is
+// nested and never starts a line).
+const secretKeyWords = `PASSWORD|PASSWD|PASS|PWD|SECRET|TOKEN|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|CLIENT_SECRET|SIGNING_KEY|ENCRYPTION_KEY|MASTER_KEY|WEBHOOK_SECRET|SESSION_SECRET|REFRESH_TOKEN|BEARER|DSN|CONNECTION_STRING|DATABASE_URL`
+
+// secretKey matches an identifier that looks like it holds a credential.
+var secretKey = `[A-Z0-9_]*(?:` + secretKeyWords + `)[A-Z0-9_]*`
+
+// secretPattern is one redaction rule.
+//
+// template is a regexp replacement template applied to the whole match; an empty
+// template means the match is replaced by a labelled marker. Templates exist
+// where the surrounding syntax carries meaning that redacting must not destroy:
+// a URL's scheme, or an assignment's key. They also keep quoted values balanced,
+// which matters because a JSON config dump is the likeliest place for a
+// credential to appear and an unbalanced quote would corrupt it.
+type secretPattern struct {
+	name     string
+	re       *regexp.Regexp
+	template string
+}
+
 // secretPatterns are matched against the finished Markdown. This runs on every
 // render because the output is pushed to GitHub, and tool results routinely
-// contain .env dumps and connection strings.
-var secretPatterns = []struct {
-	name string
-	re   *regexp.Regexp
-}{
-	{"aws_access_key", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{"github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b`)},
-	{"anthropic_key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`)},
-	{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}`)},
-	{"slack_token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)},
-	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
-	{"private_key", regexp.MustCompile(`(?s)-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----`)},
-	{"bearer_token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`)},
-	{"url_credentials", regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]{2,}://[^:@/\s]+):([^@/\s]+)@`)},
-	{"assigned_secret", regexp.MustCompile(`(?im)^\s*([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*\S+`)},
+// contain .env dumps, config files and connection strings.
+//
+// Order matters in two places. Whole-blob rules run first so that a private
+// key's interior is not partially eaten by a narrower rule. The keyed rules run
+// last, by which point any value they might have preserved has already gone.
+//
+// Over-redaction is the deliberate direction: a value that looks like a
+// credential is redacted even when it is not one. `TOKENIZER=bert` loses its
+// value. That is acceptable because the cost of a false positive is a
+// slightly less readable transcript, while the cost of a false negative is a
+// live secret in a public pull request.
+var secretPatterns = []secretPattern{
+	// Blob rules.
+	{"private_key", regexp.MustCompile(`(?s)-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----`), ""},
+
+	// Vendor-prefixed tokens, long enough that a false positive is implausible.
+	{"aws_access_key", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), ""},
+	{"github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b`), ""},
+	{"anthropic_key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`), ""},
+	{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}`), ""},
+	{"stripe_key", regexp.MustCompile(`\b(?:sk|rk)_live_[0-9a-zA-Z]{20,}`), ""},
+	{"stripe_webhook_secret", regexp.MustCompile(`\bwhsec_[A-Za-z0-9]{20,}`), ""},
+	// Covers the bot, user, refresh and the xoxc/xoxd session cookies, which are
+	// as good as a token to anyone who has one.
+	{"slack_token", regexp.MustCompile(`\bxox[a-z]-[A-Za-z0-9-]{10,}`), ""},
+	{"slack_webhook", regexp.MustCompile(`https://hooks\.slack\.com/services/[A-Za-z0-9/_-]{20,}`), ""},
+	{"gitlab_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`), ""},
+	{"npm_token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), ""},
+	{"pypi_token", regexp.MustCompile(`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{20,}`), ""},
+	{"huggingface_token", regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}\b`), ""},
+	{"digitalocean_token", regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`), ""},
+	{"sendgrid_key", regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b`), ""},
+	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`), ""},
+	{"google_oauth_secret", regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{20,}`), ""},
+	{"azure_account_key", regexp.MustCompile(`(?i)\bAccountKey=[A-Za-z0-9+/=]{40,}`), ""},
+	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`), ""},
+
+	// Header forms. Anchored to the header name, because an unanchored
+	// "basic <word>" matches ordinary prose such as "the basic implementation".
+	{"bearer_token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`), ""},
+	{"authorization_basic", regexp.MustCompile(`(?i)\bauthorization:\s*basic\s+[A-Za-z0-9+/=]+`), ""},
+
+	// Keyed rules. These keep the key so the reader can still see which setting
+	// held the secret, which is often the point of the tool result.
+	{"url_credentials", regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]{2,}://[^:@/\s]+):([^@/\s]+)@`), "$1:[REDACTED:url_credentials]@"},
+	//
+	// The quoted-value alternative stops before the closing quote so that
+	// redacting a JSON value leaves the document balanced. The bare alternative
+	// stops before a comma or semicolon for the same reason.
+	{"json_secret", regexp.MustCompile(
+		`(?i)("` + secretKey + `"[ \t]*:[ \t]*)("[^"\n]*")`), "$1[REDACTED:json_secret]"},
+	{"assigned_secret", regexp.MustCompile(
+		`(?im)^([ \t]*"?` + secretKey + `"?[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|[^\s,;]+)`), "$1[REDACTED:assigned_secret]"},
 }
 
 // Redact replaces likely secrets in rendered Markdown with a labelled marker.
@@ -464,26 +526,11 @@ var secretPatterns = []struct {
 func Redact(markdown string) string {
 	out := markdown
 	for _, p := range secretPatterns {
-		out = p.re.ReplaceAllStringFunc(out, func(match string) string {
-			// Preserve the key or scheme for readability; drop the value.
-			if p.name == "url_credentials" {
-				sub := p.re.FindStringSubmatch(match)
-				if len(sub) == 3 {
-					return sub[1] + ":[REDACTED:" + p.name + "]@"
-				}
-			}
-			if p.name == "assigned_secret" {
-				sub := p.re.FindStringSubmatch(match)
-				if len(sub) == 2 {
-					sep := "="
-					if strings.Contains(match, ":") && !strings.Contains(match, "=") {
-						sep = ":"
-					}
-					return sub[1] + sep + "[REDACTED:" + p.name + "]"
-				}
-			}
-			return "[REDACTED:" + p.name + "]"
-		})
+		tmpl := p.template
+		if tmpl == "" {
+			tmpl = "[REDACTED:" + p.name + "]"
+		}
+		out = p.re.ReplaceAllString(out, tmpl)
 	}
 	return out
 }
