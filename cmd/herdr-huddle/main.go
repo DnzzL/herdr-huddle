@@ -17,8 +17,12 @@ import (
 
 	"github.com/DnzzL/herdr-huddle/internal/auth"
 	"github.com/DnzzL/herdr-huddle/internal/github"
+	"github.com/DnzzL/herdr-huddle/internal/herdr"
+	"github.com/DnzzL/herdr-huddle/internal/poll"
 	"github.com/DnzzL/herdr-huddle/internal/repo"
+	"github.com/DnzzL/herdr-huddle/internal/session"
 	"github.com/DnzzL/herdr-huddle/internal/share"
+	"github.com/DnzzL/herdr-huddle/internal/thread"
 )
 
 // clientID is the OAuth App client id, injected at build time:
@@ -60,6 +64,8 @@ func run(args []string) error {
 		return runAuth(args[1:])
 	case "share":
 		return runShare(args[1:])
+	case "poll":
+		return runPoll(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -77,6 +83,7 @@ Usage:
   herdr-huddle auth status
   herdr-huddle auth logout
   herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
+  herdr-huddle poll [--once] [--interval 10s]
 
 Auth:
   login    Authorize with GitHub via the device flow and store the token.
@@ -96,6 +103,14 @@ Share:
            --invite give a user read access and add them to the allowlist of
                     comments that may drive the agent. Repeatable.
            --dry-run  report what would happen and change nothing.
+
+Poll:
+  poll     Keep every share in step with its agent: post what the agent has
+           said as a comment, deliver /agent comments to it, and retire a share
+           whose agent or pane is gone. Started by the plugin's startup hook,
+           and locked so that two copies never deliver an instruction twice.
+           --once      make one pass and exit, reporting what it did.
+           --interval  how often to look, default 10s.
 `)
 }
 
@@ -154,11 +169,226 @@ func runShare(args []string) error {
 
 	// The poller reads this. A failure to record the share is reported but does
 	// not undo the pull request that now exists.
+	origin, warnings := localOrigin(ctx)
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stdout, "warning   %s\n", warning)
+	}
+
 	store := share.Store{Path: filepath.Join(configDir(), "shares.json")}
-	if err := store.Put(share.FromResult(result, time.Now())); err != nil {
+	state, resumed, err := store.Record(share.FromResult(result, time.Now()), seedTranscript(origin.Session))
+	if err != nil {
 		return fmt.Errorf("the pull request is open, but recording it for the poller failed: %w", err)
 	}
+	if resumed {
+		fmt.Println("resumed   the existing thread: what has already been posted and delivered is not repeated")
+	}
+	if origin.PaneID == "" {
+		// Nothing to drive or sync from, so the poller retires the share. Saying
+		// so here is the difference between that being deliberate and looking
+		// like a bug.
+		return nil
+	}
+	fmt.Printf("agent     %s in pane %s\n", state.Origin.Agent, state.Origin.PaneID)
+	if state.Origin.Session != "" {
+		fmt.Printf("session   %s\n", state.Origin.Session)
+	} else {
+		fmt.Println("session   none found; the terminal will be read instead and labelled partial")
+	}
 	return nil
+}
+
+// localOrigin binds a share to the agent it is driving (ADR-003). Without this
+// the poller knows where to post and not what to drive.
+//
+// It never fails: a share opened outside a Herdr pane is still a useful thread,
+// and the operator is told why nothing will be synced.
+func localOrigin(ctx context.Context) (share.Origin, []string) {
+	pane := os.Getenv("HERDR_PANE_ID")
+	if pane == "" {
+		return share.Origin{}, []string{
+			"not running inside a Herdr pane, so this share is not bound to an agent: herdr-huddle will post nothing and deliver nothing. Re-run `share` from the agent's pane to sync it.",
+		}
+	}
+
+	client := &herdr.Client{}
+	agent, err := client.Agent(ctx, pane)
+	if err != nil {
+		return share.Origin{}, []string{fmt.Sprintf("could not read the agent in pane %s, so this share is not bound to one: %v", pane, err)}
+	}
+
+	origin := share.Origin{Agent: agent.Label(), PaneID: agent.PaneID, CWD: agent.CWD}
+	if origin.PaneID == "" {
+		origin.PaneID = pane
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	src, err := session.Resolve(home, agent)
+	if err != nil {
+		return origin, []string{fmt.Sprintf("could not look for the transcript: %v", err)}
+	}
+	// Record how the transcript was found even when it was not, so the share
+	// says the same thing the poller will say on its first pass.
+	origin.Session = src.Path
+	origin.Partial = src.Partial
+	if src.Path != "" {
+		origin.SessionID, _ = session.SessionID(src.Path)
+		return origin, nil
+	}
+	return origin, []string{"no session file was found for this pane: " + src.Reason}
+}
+
+// seedTranscript is where a brand new share's transcript cursor starts: the end
+// of the session, so opening a share does not dump the conversation the
+// operator has already had into the thread.
+func seedTranscript(path string) string {
+	if path == "" {
+		return ""
+	}
+	cursor, err := thread.EndCursor(path)
+	if err != nil {
+		return ""
+	}
+	return cursor
+}
+
+// runPoll keeps the threads and their agents in step. ADR-001 makes it a
+// long-lived process because it has to watch in both directions: the GitHub
+// side has no webhook to receive and the agent side has no way to be told.
+func runPoll(args []string) error {
+	fs := flag.NewFlagSet("poll", flag.ContinueOnError)
+	once := fs.Bool("once", false, "make one pass and exit")
+	interval := fs.Duration("interval", 0, "how often to look for changes")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("%w: `poll` takes no positional arguments, got %q", errUsage, fs.Arg(0))
+	}
+
+	ctx, stop := withSignals()
+	defer stop()
+
+	// The lock is taken before anything else, including reading a token: a
+	// second poller must do nothing at all, not even touch the keychain.
+	var release func()
+	if !*once {
+		var err error
+		release, err = poll.Acquire(filepath.Join(configDir(), "poll.lock"))
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+
+	intervalValue := effectiveInterval(*interval)
+	shares := share.Store{Path: filepath.Join(configDir(), "shares.json")}
+	poller := &poll.Poller{
+		Shares: shares,
+		Herdr:  &herdr.Client{},
+		Forge:  &lazyForge{store: defaultStore()},
+		Options: poll.Options{
+			Interval: intervalValue,
+		},
+		Log: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
+		},
+	}
+
+	if *once {
+		// Deliberately no lock: a one-shot pass is for looking at what the
+		// poller would do, and refusing to answer because the daemon is running
+		// would make it useless exactly when it is wanted.
+		out, err := poller.Once(ctx)
+		printPollResult(os.Stdout, out)
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "herdr-huddle: polling every %s\n", intervalValue)
+	return poller.Run(ctx)
+}
+
+// lazyForge defers loading the token until a GitHub call actually needs one.
+//
+// Two things fall out of that. A poller with nothing to do — no shares, or only
+// retired ones — never asks for a token at all, so it does not fail on a machine
+// where nobody has logged in yet. And a daemon that started before `auth login`
+// starts working once the login happens, instead of sitting there quietly until
+// the plugin is restarted.
+type lazyForge struct {
+	store  *auth.TokenStore
+	client *github.Client
+}
+
+// The token is read once and kept: a pass happens every ten seconds, and the
+// keychain is reached through a subprocess on Linux.
+func (f *lazyForge) load(ctx context.Context) (*github.Client, error) {
+	if f.client != nil {
+		return f.client, nil
+	}
+	token, _, err := f.store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	f.client = &github.Client{Token: token}
+	return f.client, nil
+}
+
+func (f *lazyForge) CreateComment(ctx context.Context, owner, repoName string, number int, body string) (github.Comment, error) {
+	client, err := f.load(ctx)
+	if err != nil {
+		return github.Comment{}, err
+	}
+	return client.CreateComment(ctx, owner, repoName, number, body)
+}
+
+func (f *lazyForge) ListComments(ctx context.Context, owner, repoName string, number int, since time.Time, etag string) (github.Comments, error) {
+	client, err := f.load(ctx)
+	if err != nil {
+		return github.Comments{}, err
+	}
+	return client.ListComments(ctx, owner, repoName, number, since, etag)
+}
+
+func (f *lazyForge) Acknowledge(ctx context.Context, owner, repoName string, commentID int64, content string) error {
+	client, err := f.load(ctx)
+	if err != nil {
+		return err
+	}
+	return client.Acknowledge(ctx, owner, repoName, commentID, content)
+}
+
+// effectiveInterval reports the interval that will actually be used, so the
+// banner does not say "0s" when the default is doing the work.
+func effectiveInterval(flagValue time.Duration) time.Duration {
+	if flagValue > 0 {
+		return flagValue
+	}
+	return poll.DefaultInterval
+}
+
+// printPollResult reports one pass in the order the work happened.
+func printPollResult(w io.Writer, out poll.Result) {
+	for _, line := range out.Posted {
+		fmt.Fprintf(w, "posted    %s\n", line)
+	}
+	for _, line := range out.Injected {
+		fmt.Fprintf(w, "delivered %s\n", line)
+	}
+	for _, refusal := range out.Refused {
+		fmt.Fprintf(w, "refused   @%s: %s\n", refusal.Author, refusal.Reason)
+	}
+	for _, branch := range out.Retired {
+		fmt.Fprintf(w, "retired   %s\n", branch)
+	}
+	for _, warning := range out.Warnings {
+		fmt.Fprintf(w, "warning   %s\n", warning)
+	}
+	if len(out.Posted)+len(out.Injected)+len(out.Refused)+len(out.Retired)+len(out.Warnings) == 0 {
+		fmt.Fprintln(w, "nothing to do")
+	}
 }
 
 // printShareResult reports what happened, in the order the pieces came into

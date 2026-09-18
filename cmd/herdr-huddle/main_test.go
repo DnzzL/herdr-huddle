@@ -2,16 +2,45 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DnzzL/herdr-huddle/internal/github"
+	"github.com/DnzzL/herdr-huddle/internal/poll"
 	"github.com/DnzzL/herdr-huddle/internal/repo"
 	"github.com/DnzzL/herdr-huddle/internal/share"
+	"github.com/DnzzL/herdr-huddle/internal/thread"
 )
+
+// captureStdout collects what a command prints, which is how an operator reads
+// it and therefore what a test has to look at.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	saved := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		out, _ := io.ReadAll(r)
+		done <- string(out)
+	}()
+
+	fn()
+
+	w.Close()
+	os.Stdout = saved
+	return <-done
+}
 
 // splitRepo feeds an API path, so a malformed slug must be rejected rather
 // than escaped and hoped for.
@@ -236,5 +265,158 @@ func TestRunShareDryRunNeedsNoToken(t *testing.T) {
 	store := share.Store{Path: filepath.Join(os.Getenv("HERDR_PLUGIN_CONFIG_DIR"), "shares.json")}
 	if states, err := store.Load(); err != nil || len(states) != 0 {
 		t.Errorf("a dry run recorded shares: %v, %v", states, err)
+	}
+}
+
+func TestEffectiveIntervalReportsTheDefaultItWillUse(t *testing.T) {
+	// The banner must not claim "0s" when the default is doing the work.
+	if got := effectiveInterval(0); got != poll.DefaultInterval {
+		t.Errorf("effectiveInterval(0) = %s, want the default %s", got, poll.DefaultInterval)
+	}
+	if got := effectiveInterval(3 * time.Second); got != 3*time.Second {
+		t.Errorf("effectiveInterval(3s) = %s, want 3s", got)
+	}
+}
+
+func TestSeedTranscriptStartsAtTheEndOfTheSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	records := `{"type":"user","uuid":"u1","message":{"role":"user","content":"hello"}}
+{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}
+`
+	if err := os.WriteFile(path, []byte(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Opening a share must not dump the conversation the operator has already
+	// had into the thread.
+	if got := seedTranscript(path); got != "a1" {
+		t.Errorf("seedTranscript = %q, want the last record's uuid", got)
+	}
+	if got := seedTranscript(""); got != "" {
+		t.Errorf("seedTranscript(\"\") = %q, want the empty cursor", got)
+	}
+	if got := seedTranscript(filepath.Join(t.TempDir(), "gone.jsonl")); got != "" {
+		t.Errorf("seedTranscript of a missing file = %q, want the empty cursor so the poller decides", got)
+	}
+}
+
+func TestPrintPollResult(t *testing.T) {
+	var buf bytes.Buffer
+	printPollResult(&buf, poll.Result{
+		Posted:   []string{"herdr/x: https://github.com/a/b/pull/1#issuecomment-2"},
+		Injected: []string{"herdr/x: @bob"},
+		Refused:  []thread.Refusal{{Author: "mallory", Reason: "not on this share's allowlist"}},
+		Retired:  []string{"herdr/y"},
+		Warnings: []string{"herdr/x: the thread could not be read"},
+	})
+	got := buf.String()
+	for _, want := range []string{"posted", "delivered", "refused", "mallory", "retired", "warning"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q does not mention %q", got, want)
+		}
+	}
+
+	buf.Reset()
+	printPollResult(&buf, poll.Result{})
+	if !strings.Contains(buf.String(), "nothing to do") {
+		t.Errorf("empty result printed %q, want it to say so", buf.String())
+	}
+}
+
+func TestLazyForgeNeedsNoTokenUntilItIsUsed(t *testing.T) {
+	// A poller with nothing to do must not fail on a machine where nobody has
+	// logged in, and a daemon that started before `auth login` must start
+	// working after it rather than needing a restart.
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+
+	forge := &lazyForge{store: defaultStore()}
+	if _, err := forge.load(context.Background()); err == nil {
+		t.Fatal("want an error when there is no token anywhere")
+	}
+	if forge.client != nil {
+		t.Error("a failed load left a client behind, so a later login would not be picked up")
+	}
+
+	t.Setenv("GH_TOKEN", "ghp_from_the_environment")
+	client, err := forge.load(context.Background())
+	if err != nil {
+		t.Fatalf("load after a token appeared: %v", err)
+	}
+	if client.Token != "ghp_from_the_environment" {
+		t.Errorf("token = %q, want the one that appeared", client.Token)
+	}
+}
+
+func TestLocalOriginWithoutAPane(t *testing.T) {
+	t.Setenv("HERDR_PANE_ID", "")
+	origin, warnings := localOrigin(context.Background())
+	if origin.PaneID != "" {
+		t.Errorf("origin = %+v, want none", origin)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "not running inside a Herdr pane") {
+		t.Errorf("warnings = %v, want one explaining that nothing will be synced", warnings)
+	}
+}
+
+func TestLocalOriginReportsAPaneWithNoAgent(t *testing.T) {
+	t.Setenv("HERDR_PANE_ID", "wQ:p999")
+	origin, warnings := localOrigin(context.Background())
+	if origin.PaneID != "" {
+		t.Errorf("origin = %+v, want none for a pane that does not exist", origin)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "wQ:p999") {
+		t.Errorf("warnings = %v, want one naming the pane", warnings)
+	}
+}
+
+// TestLocalOriginAgainstTheLiveAgent is the real thing: it is what the share
+// record is populated from, so a wrong field here is a poller that drives
+// nothing. It self-skips outside a Herdr pane.
+func TestLocalOriginAgainstTheLiveAgent(t *testing.T) {
+	pane := os.Getenv("HERDR_PANE_ID")
+	if os.Getenv("HERDR_ENV") != "1" || pane == "" {
+		t.Skip("not running inside a Herdr pane")
+	}
+
+	origin, warnings := localOrigin(context.Background())
+	for _, warning := range warnings {
+		t.Logf("warning: %s", warning)
+	}
+	if origin.PaneID != pane {
+		t.Errorf("PaneID = %q, want the pane the share was opened in (%q)", origin.PaneID, pane)
+	}
+	if origin.Agent == "" {
+		t.Error("Agent is empty, so the thread would not say which agent it is watching")
+	}
+	if origin.CWD == "" {
+		t.Error("CWD is empty, so a new session could not be found by working directory")
+	}
+	t.Logf("origin: agent=%q pane=%q cwd=%q session=%q partial=%v", origin.Agent, origin.PaneID, origin.CWD, origin.Session, origin.Partial)
+}
+
+func TestRunPollOnceWithNothingToDo(t *testing.T) {
+	// No shares and no token: a one-shot poll must say so rather than demand a
+	// login for work that does not exist.
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+
+	out := captureStdout(t, func() {
+		if err := runPoll([]string{"--once"}); err != nil {
+			t.Fatalf("runPoll: %v", err)
+		}
+	})
+	if !strings.Contains(out, "nothing to do") {
+		t.Errorf("output = %q, want it to report that there was nothing to do", out)
+	}
+}
+
+func TestRunPollRejectsPositionalArguments(t *testing.T) {
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	err := runPoll([]string{"extra"})
+	if !errors.Is(err, errUsage) {
+		t.Errorf("err = %v, want a usage error", err)
 	}
 }

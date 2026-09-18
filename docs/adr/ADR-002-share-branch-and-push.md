@@ -77,10 +77,11 @@ these are worth pinning before the code exists.
 - not tested: no push and no pull request has ever run against GitHub. The
   branch, empty commit, base selection, idempotency and push are exercised
   against a local bare repository, and the API against a fake server.
-- not done: nothing reads `shares.json` yet, so the record `share` writes is
-  inert until the poller (P4) exists.
-- not done: the PR body is the placeholder `share` writes; the transcript splice
-  is P3.
+- not done: `share` records the share and opens the thread, but the transcript
+  arrives only once the poller runs — see ADR-003 for why the body stays a
+  header and what that means for a fresh share.
+- not done: nothing reaps a share's branch or pull request. A retired share keeps
+  both, deliberately, and its record is kept forever.
 - unknown: whether a work-org installation permits collaborator invitations at
   all. The failure is a warning by design, and the operator's own login on the
   allowlist is what keeps the loop usable when it fails.

@@ -37,11 +37,16 @@ time — before any code exists**. One object carries three phases:
 - **Auth**: OAuth App + device flow. `client_id` compiled in, no client secret,
   no hosted callback. Token in the OS keychain. `public_repo` for public repos,
   `repo` only for private ones.
-- **Transcript → PR body**, rewritten each agent turn. Source, in order:
-  Claude Code session JSONL (`~/.claude/projects/<slug>/<session-uuid>.jsonl`,
-  where the UUID is handed over by `herdr agent list` as
-  `agent_session.value`), falling back to `herdr agent read` for other agents
-  and marked in the PR body as a partial terminal snapshot.
+- **Transcript → PR comments**, one per completed agent turn. The PR body is a
+  header written once at `share` time. **Amended by ADR-003**: a rewritten body
+  notifies nobody, and the API rejects bodies past 65,536 characters. Source, in
+  order: Claude Code session JSONL
+  (`~/.claude/projects/<slug>/<session-uuid>.jsonl`, where the path is handed
+  over by `herdr agent list` as `agent_session.value` when
+  `agent_session.kind` is `path`, and the UUID when it is `id`; in practice no
+  agent on this machine reports one at all, so the session is also located by
+  the pane's working directory), falling back to `herdr agent read` for other
+  agents and marked in the thread as a partial terminal snapshot.
 - **Comments → agent**: poll the PR comment endpoints every 10s with ETag
   (304s do not count against the 5000/h REST quota). A comment is injected via
   `herdr agent prompt` only if it passes **all three**: an `/agent` prefix, an
@@ -50,11 +55,14 @@ time — before any code exists**. One object carries three phases:
   input carrying the author's login.
 - **The permission gate is never delegated.** An agent blocked on an approval
   posts a PR comment naming what it is waiting for; only the operator answers it.
-- **Concurrency**: a comment arriving while the agent is `working` gets a 🚧
-  reaction and is queued, never dropped.
+- **Concurrency**: a comment arriving while the agent is `working` gets an
+  `eyes` reaction and is queued, never dropped.
 - **Poller lifecycle**: a single global process, PID-locked, state in
   `herdr plugin config-dir`, (re)started by the plugin's **startup hook** — which
-  also re-fires on live handoff (`herdr update`). Exits when no share is active.
+  also re-fires on live handoff (`herdr update`). It stops when the Herdr server
+  it belongs to has gone (a run of failed passes) rather than exiting whenever no
+  share is active; **ADR-003** defines what makes a share active, and how a share
+  ends. A poller with nothing active to serve costs one file read per pass.
 - **Nothing to install for the other person.** github.com is the whole client.
 
 ## Consequences
