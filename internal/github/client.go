@@ -61,21 +61,33 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
+// errNotModified reports a 304 in response to a conditional request. It is not
+// an error for a poller — it means "nothing changed, and this request did not
+// count against the rate limit" — so it is distinguished from *APIError.
+var errNotModified = errors.New("github: not modified")
+
 // do performs one request and decodes a JSON response into out, which may be
 // nil. body is encoded as JSON when non-nil.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	_, err := c.doWith(ctx, method, path, body, nil, out)
+	return err
+}
+
+// doWith is do with conditional-request headers, returning the response headers
+// so a caller can remember an ETag.
+func (c *Client) doWith(ctx context.Context, method, path string, body any, headers map[string]string, out any) (http.Header, error) {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("github: encode request: %w", err)
+			return nil, fmt.Errorf("github: encode request: %w", err)
 		}
 		payload = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL()+path, payload)
 	if err != nil {
-		return fmt.Errorf("github: build request: %w", err)
+		return nil, fmt.Errorf("github: build request: %w", err)
 	}
 	// The version header pins behaviour: without it GitHub may serve an older
 	// API shape.
@@ -89,29 +101,36 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("github: %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("github: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.Header, errNotModified
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return apiError(resp)
+		return resp.Header, apiError(resp)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
+		return resp.Header, nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		if errors.Is(err, io.EOF) {
 			// A 204 or an empty body is not an error for callers that do not
 			// need a response.
-			return nil
+			return resp.Header, nil
 		}
-		return fmt.Errorf("github: decode %s %s: %w", method, path, err)
+		return resp.Header, fmt.Errorf("github: decode %s %s: %w", method, path, err)
 	}
-	return nil
+	return resp.Header, nil
 }
 
 // apiError turns a failed response into an *APIError, tolerating bodies that

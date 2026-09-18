@@ -104,6 +104,22 @@ func Parse(data []byte) ([]Record, error) {
 	return records, nil
 }
 
+// LastUUID is the cursor at the end of a set of records: the last UUID that
+// Render would return after processing all of them.
+//
+// Used to prime a cursor before anything has been delivered. A share starts
+// from where the conversation is now, because a session file routinely
+// predates the share by hours and publishing that history would both misstate
+// the thread and overrun GitHub's comment limit.
+func LastUUID(records []Record) string {
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].UUID != "" {
+			return records[i].UUID
+		}
+	}
+	return ""
+}
+
 // Render turns records into Markdown, processing only records after afterUUID.
 // An empty afterUUID renders everything. The result carries the cursor for the
 // next call.

@@ -423,3 +423,90 @@ func TestLiveHerdrReadIfPresent(t *testing.T) {
 		t.Errorf("live Read(%s) returned nothing; the read surface may have changed", pane)
 	}
 }
+
+func TestPrompt_PassesTheTextAsOneArgument(t *testing.T) {
+	r := &fakeRunner{stdout: `{"id":"cli:agent:prompt","result":{}}`}
+	text := "A message from @bob\n\n---\n\nrm -rf / ; echo pwned"
+
+	if err := newTestClient(r).Prompt(context.Background(), "wQ:p1", text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := r.lastArgs()
+	want := []string{"herdr", "agent", "prompt", "wQ:p1", text}
+	if len(got) != len(want) {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("arg %d = %q, want %q (the text must not be split or shell-interpreted)", i, got[i], want[i])
+		}
+	}
+	// No --wait: the poller must not block on a turn it does not run.
+	for _, arg := range got {
+		if arg == "--wait" {
+			t.Errorf("args = %q, want no --wait", got)
+		}
+	}
+}
+
+func TestPrompt_RefusesAnEmptyPrompt(t *testing.T) {
+	r := &fakeRunner{}
+	c := newTestClient(r)
+	if err := c.Prompt(context.Background(), "wQ:p1", "   \n "); err == nil {
+		t.Fatal("want an error for a blank prompt")
+	}
+	if err := c.Prompt(context.Background(), "", "hi"); err == nil {
+		t.Fatal("want an error for a missing target")
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("ran %q, want no command for a refused prompt", r.calls)
+	}
+}
+
+func TestPrompt_ReportsABlockedAgent(t *testing.T) {
+	// Herdr refuses a prompt to a blocked agent before any input is sent, which
+	// is the guarantee ADR-001 leans on: an approval is only ever answered by
+	// the operator at the terminal.
+	r := &fakeRunner{
+		stderr:   `{"error":{"code":"agent_blocked","message":"agent is blocked on approval"},"id":"cli:agent:prompt"}`,
+		exitCode: 1,
+	}
+	err := newTestClient(r).Prompt(context.Background(), "wQ:p1", "hi")
+	if err == nil {
+		t.Fatal("want an error when the agent is blocked")
+	}
+	if !strings.Contains(err.Error(), "agent_blocked") {
+		t.Errorf("error = %v, want it to carry herdr's code", err)
+	}
+}
+
+func TestAgent_BusyAndLabel(t *testing.T) {
+	// A turn is published when the agent is not working, and an instruction is
+	// held back while it is working or blocked.
+	tests := []struct {
+		status string
+		busy   bool
+	}{
+		{"idle", false},
+		{"done", false},
+		{"unknown", false},
+		{"working", true},
+		{"blocked", true},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := (Agent{Status: tc.status}).Busy(); got != tc.busy {
+			t.Errorf("status %q: Busy() = %v, want %v", tc.status, got, tc.busy)
+		}
+	}
+
+	if got := (Agent{DisplayAgent: "Claude Code", Agent: "claude"}).Label(); got != "Claude Code" {
+		t.Errorf("Label() = %q, want the display name", got)
+	}
+	if got := (Agent{Agent: "pi"}).Label(); got != "pi" {
+		t.Errorf("Label() = %q, want the identity when there is no display name", got)
+	}
+	if got := (Agent{}).Label(); got != "agent" {
+		t.Errorf("Label() = %q, want a usable default", got)
+	}
+}

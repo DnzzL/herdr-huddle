@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -24,9 +25,72 @@ type State struct {
 	// Allowlist is the logins whose comments may drive the agent. ADR-001
 	// requires all three of: an /agent prefix, a collaborative
 	// author_association, and membership of this list.
-	Allowlist []string  `json:"allowlist"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Allowlist []string `json:"allowlist"`
+	// Origin is the local state the share is bound to. ADR-003 makes this part
+	// of the record: without it the poller knows where to post and not what to
+	// drive.
+	Origin Origin `json:"origin"`
+	// Cursors is how far each direction of the sync has been read.
+	Cursors Cursors `json:"cursors"`
+	// RetiredAt is when the share stopped being polled, because its agent or
+	// pane was gone. The record is kept rather than deleted so that re-opening
+	// the share resumes it instead of repeating the conversation.
+	RetiredAt *time.Time `json:"retired_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// Origin is the local state on the operator's machine that a share depends on.
+//
+// Everything here is read from Herdr or from the session file. None of it can
+// be recovered from GitHub, which is why it is recorded at share time rather
+// than looked up by the poller.
+type Origin struct {
+	// Agent is the agent's identity, for display. It is not a target: herdr
+	// resolves names only for agents it started itself.
+	Agent string `json:"agent,omitempty"`
+	// PaneID is what herdr accepts as a target, and what the poller checks for
+	// liveness.
+	PaneID string `json:"pane_id,omitempty"`
+	// CWD is the pane's working directory, which is how the session file is
+	// found again if it has to be.
+	CWD string `json:"cwd,omitempty"`
+	// Session is the transcript file. Empty when the agent has none.
+	Session string `json:"session,omitempty"`
+	// SessionID is the id recorded inside the session file, which survives the
+	// file being moved.
+	SessionID string `json:"session_id,omitempty"`
+	// Partial is true when the transcript can only come from the terminal.
+	Partial bool `json:"partial,omitempty"`
+}
+
+// Cursors is the sync's read position in each direction.
+type Cursors struct {
+	// Transcript is the last transcript position delivered to the thread.
+	Transcript string `json:"transcript,omitempty"`
+	// Comment is the newest comment already handled. It is what stops a
+	// restart from injecting an instruction that has already been delivered.
+	Comment int64 `json:"comment,omitempty"`
+	// Snapshot identifies the last terminal snapshot delivered. A terminal has
+	// no cursor, so the content itself is the only thing to compare.
+	Snapshot string `json:"snapshot,omitempty"`
+	// ETag is the comment list's validator from the last read. A pass that
+	// re-asks with it costs no quota when nothing has changed (ADR-001).
+	ETag string `json:"etag,omitempty"`
+	// Blocked records that the thread has already been told the agent is
+	// waiting for an approval, so the same episode is announced once.
+	Blocked bool `json:"blocked,omitempty"`
+}
+
+// Active reports whether the share should still be polled.
+func (s State) Active() bool { return s.RetiredAt == nil }
+
+// Owner splits Repo into its owner and name.
+func (s State) Owner() (string, string) {
+	if owner, name, ok := strings.Cut(s.Repo, "/"); ok {
+		return owner, name
+	}
+	return "", s.Repo
 }
 
 // Key identifies the share. The branch is the identity ADR-002 makes idempotent,
@@ -45,6 +109,62 @@ func FromResult(res Result, now time.Time) State {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+}
+
+// Record stores a share for the poller, keeping the progress an existing record
+// has already made.
+//
+// Re-running `share` on the same branch is how an operator picks a thread back
+// up, so it must not reset the cursors. A reset instruction cursor would have
+// the agent carry out every instruction in the thread a second time, and a reset
+// transcript cursor would repost a conversation the thread already holds.
+//
+// seedTranscript is where the transcript cursor starts when there is nothing to
+// carry over: the end of the session, so the first share does not replay the
+// conversation the operator already lived through.
+//
+// The returned bool reports whether a record was resumed rather than created.
+func (s Store) Record(fresh State, seedTranscript string) (State, bool, error) {
+	if fresh.Key() == "#" {
+		return State{}, false, errors.New("share: refusing to record a share with no repository or branch")
+	}
+	states, err := s.Load()
+	if err != nil {
+		return State{}, false, err
+	}
+
+	fresh.Cursors.Transcript = seedTranscript
+
+	resumed := false
+	for _, existing := range states {
+		if existing.Key() != fresh.Key() {
+			continue
+		}
+		resumed = true
+		switch {
+		case existing.Origin.Session != "" && existing.Origin.Session == fresh.Origin.Session:
+			// The same session: nothing has changed underneath the share, so
+			// every cursor still means what it meant.
+			fresh.Cursors = existing.Cursors
+		default:
+			// A different session — the agent restarted, or a different agent
+			// is in the pane. Instructions the thread has already delivered stay
+			// delivered: re-injecting all of them into a new agent would fan a
+			// pile of side effects out a second time.
+			//
+			// The snapshot is carried over too. It identifies terminal content
+			// that has already been posted, and identical content is a duplicate
+			// whatever the session is doing; dropping it would repost the pane
+			// on every re-share of a share that has no session file at all.
+			fresh.Cursors.Comment = existing.Cursors.Comment
+			fresh.Cursors.ETag = existing.Cursors.ETag
+			fresh.Cursors.Blocked = existing.Cursors.Blocked
+			fresh.Cursors.Snapshot = existing.Cursors.Snapshot
+		}
+		break
+	}
+
+	return fresh, resumed, s.Put(fresh)
 }
 
 // Store is the on-disk list of active shares.

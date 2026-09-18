@@ -88,6 +88,38 @@ type Agent struct {
 	Session       *AgentSession `json:"agent_session"`
 }
 
+// Agent status, as herdr reports it. The poller's behaviour depends on these
+// values: a turn is published once the agent is no longer working, and an
+// instruction is held back rather than typed into a busy terminal.
+const (
+	StatusIdle    = "idle"
+	StatusWorking = "working"
+	StatusBlocked = "blocked"
+	StatusDone    = "done"
+	StatusUnknown = "unknown"
+)
+
+// Busy reports whether the agent is in the middle of something, so that a new
+// instruction would land inside a turn instead of starting one.
+//
+// Blocked counts as busy: herdr refuses a prompt to a blocked agent outright,
+// which is the guarantee that an approval is only ever answered at the
+// terminal.
+func (a Agent) Busy() bool {
+	return a.Status == StatusWorking || a.Status == StatusBlocked
+}
+
+// Label names the agent for the shared thread, preferring the name meant for
+// people over the identity meant for the machine.
+func (a Agent) Label() string {
+	for _, candidate := range []string{a.DisplayAgent, a.Agent} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return "agent"
+}
+
 // AgentSessionKind says how to read AgentSession.Value, which is the whole
 // point of the field. Both values are documented by the server's schema in an
 // enum called AgentSessionRefKind.
@@ -296,6 +328,24 @@ func (c *Client) Read(ctx context.Context, target string, lines int) (string, er
 		return "", err
 	}
 	return string(stdout), nil
+}
+
+// Prompt submits text to an agent, as if it had been typed at the terminal.
+//
+// The text is one argument, not a shell string, so its contents cannot become
+// a command. Herdr itself enforces the rule ADR-001 depends on most: a prompt
+// to a **blocked** agent is refused with agent_blocked before any input is
+// sent, so an approval the agent is waiting for can never be answered by
+// anything but the operator.
+func (c *Client) Prompt(ctx context.Context, target, text string) error {
+	if target == "" {
+		return errors.New("herdr: agent target is required")
+	}
+	if strings.TrimSpace(text) == "" {
+		return errors.New("herdr: refusing to submit an empty prompt")
+	}
+	_, err := c.call(ctx, "agent", "prompt", target, text)
+	return err
 }
 
 // truncateForError keeps a decode failure readable when a response is large.

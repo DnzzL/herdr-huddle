@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DnzzL/herdr-huddle/internal/repo"
 )
 
 func testStore(t *testing.T) Store {
@@ -221,5 +223,131 @@ func TestState_JSONFieldNamesAreStable(t *testing.T) {
 		if !strings.Contains(string(raw), field) {
 			t.Errorf("encoded state is missing %s: %s", field, raw)
 		}
+	}
+}
+
+func TestRecord_NewShareStartsAtTheEndOfTheSession(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	now := time.Now()
+
+	fresh := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	got, resumed, err := store.Record(fresh, "uuid-at-the-end")
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if resumed {
+		t.Error("resumed = true, want false for a share that did not exist")
+	}
+	// ADR-003: a first share does not replay the conversation the operator
+	// already had.
+	if got.Cursors.Transcript != "uuid-at-the-end" {
+		t.Errorf("Transcript cursor = %q, want the seeded end of the session", got.Cursors.Transcript)
+	}
+	if got.Cursors.Comment != 0 {
+		t.Errorf("Comment cursor = %d, want 0 so existing instructions are read", got.Cursors.Comment)
+	}
+}
+
+func TestRecord_ReSharingKeepsTheCursors(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	now := time.Now()
+
+	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	base.Origin = Origin{PaneID: "wQ:p1", Session: "/home/t/.claude/projects/-x/s.jsonl", Agent: "claude"}
+	base.Cursors = Cursors{Transcript: "t9", Comment: 42, Snapshot: "abc", ETag: `W/"1"`, Blocked: true}
+	if _, _, err := store.Record(base, "seed"); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	stored, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("got %d records, want 1", len(stored))
+	}
+
+	// The operator re-runs `share` to pick the thread back up.
+	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now.Add(time.Hour))
+	again.Origin = base.Origin
+	got, resumed, err := store.Record(again, "a-brand-new-seed")
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if !resumed {
+		t.Error("resumed = false, want true for an existing share")
+	}
+	if got.Cursors != stored[0].Cursors {
+		t.Errorf("Cursors = %+v, want the existing ones %+v", got.Cursors, stored[0].Cursors)
+	}
+	if got.Cursors.Transcript == "a-brand-new-seed" {
+		t.Error("re-sharing reseeded the transcript cursor, so the thread would repeat turns")
+	}
+	states, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Errorf("re-sharing left %d records, want 1", len(states))
+	}
+}
+
+func TestRecord_ANewSessionKeepsTheInstructionCursor(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	now := time.Now()
+
+	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	base.Origin = Origin{PaneID: "wQ:p1", Session: "/home/t/.claude/projects/-x/old.jsonl"}
+	base.Cursors = Cursors{Transcript: "old-9", Comment: 42, Snapshot: "abc", ETag: `W/"1"`}
+	if _, _, err := store.Record(base, "seed"); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// The agent restarted, so the same share now points at a new session.
+	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now.Add(time.Hour))
+	again.Origin = Origin{PaneID: "wQ:p1", Session: "/home/t/.claude/projects/-x/new.jsonl"}
+	got, _, err := store.Record(again, "new-seed")
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	if got.Cursors.Transcript != "new-seed" {
+		t.Errorf("Transcript cursor = %q, want the new session's end", got.Cursors.Transcript)
+	}
+	// Instructions already carried out are not carried out again.
+	if got.Cursors.Comment != 42 || got.Cursors.ETag != `W/"1"` {
+		t.Errorf("Cursors = %+v, want the instruction cursor and ETag kept", got.Cursors)
+	}
+	// Neither is terminal content that is already in the thread: identical
+	// content is a duplicate whatever session is behind it.
+	if got.Cursors.Snapshot != "abc" {
+		t.Errorf("Snapshot = %q, want the posted snapshot kept", got.Cursors.Snapshot)
+	}
+}
+
+func TestRecord_RefusesAnEmptyKey(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	if _, _, err := store.Record(State{}, ""); err == nil {
+		t.Fatal("want an error rather than a record no share can ever match")
+	}
+}
+
+func TestRecord_RevivesARetiredShare(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	now := time.Now()
+	retired := now.Add(-time.Hour)
+
+	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	base.RetiredAt = &retired
+	if err := store.Put(base); err != nil {
+		t.Fatal(err)
+	}
+
+	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	got, _, err := store.Record(again, "seed")
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if !got.Active() {
+		t.Error("the record is still retired, so the poller would never serve it again")
 	}
 }
