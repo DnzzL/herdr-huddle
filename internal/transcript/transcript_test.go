@@ -56,8 +56,12 @@ func loadFixture(t *testing.T) []Record {
 	if err != nil {
 		t.Fatalf("parse fixture: %v", err)
 	}
-	if len(records) != 17 {
-		t.Fatalf("fixture should have 17 records, got %d", len(records))
+	// Deliberately no exact record count here. The fixture grows as real
+	// sessions reveal new record shapes, and a magic number in a shared helper
+	// means every one of those additions fails a dozen unrelated tests. Each
+	// test asserts the records it actually needs.
+	if len(records) == 0 {
+		t.Fatal("fixture parsed to zero records")
 	}
 	return records
 }
@@ -174,13 +178,20 @@ func TestProperty5_NoiseRecordsProduceNoOutput(t *testing.T) {
 	}
 
 	var noise []Record
+	found := map[string]int{}
 	for _, r := range records {
 		if noiseTypes[r.Type] {
 			noise = append(noise, r)
+			found[r.Type]++
 		}
 	}
-	if len(noise) != 9 {
-		t.Fatalf("expected 9 noise records in fixture, found %d", len(noise))
+	// Assert per type rather than on a total, so adding another record of a
+	// kind already covered does not break the test, while dropping the last
+	// record of a kind does.
+	for typ := range noiseTypes {
+		if found[typ] == 0 {
+			t.Errorf("fixture no longer exercises noise type %q", typ)
+		}
 	}
 
 	out := render(t, noise, "", Options{})
@@ -253,13 +264,24 @@ func TestProperty7_IncrementalFromLastUUID(t *testing.T) {
 		t.Errorf("incremental tail does not match full render suffix\n--- suffix ---\n%s\n--- incremental ---\n%s", fullTail, inc.Markdown)
 	}
 
-	// The newest record produces no output of its own (an atis-latch), but the
-	// cursor must still advance — otherwise the poller re-renders forever.
-	empty := Render(records, records[15].UUID, Options{})
-	if strings.TrimSpace(empty.Markdown) != "" {
-		t.Errorf("only a noise record follows, expected no new output, got:\n%s", empty.Markdown)
+	// The fixture ends with records that render nothing, but the cursor must
+	// still advance past them — otherwise the poller re-renders forever. Both
+	// the position and the expectation are derived, so appending records to the
+	// fixture does not silently stop exercising this.
+	lastRendering := -1
+	for i, r := range records {
+		if r.Type == "user" || r.Type == "assistant" {
+			lastRendering = i
+		}
 	}
-	if want := records[16].UUID; empty.LastUUID != want {
+	if lastRendering < 0 || lastRendering+1 >= len(records) {
+		t.Fatal("fixture must end with at least one non-rendering record to exercise cursor advance")
+	}
+	empty := Render(records, records[lastRendering].UUID, Options{})
+	if strings.TrimSpace(empty.Markdown) != "" {
+		t.Errorf("only noise records follow, expected no new output, got:\n%s", empty.Markdown)
+	}
+	if want := records[len(records)-1].UUID; empty.LastUUID != want {
 		t.Errorf("cursor must advance past non-rendering records: LastUUID = %q, want %q", empty.LastUUID, want)
 	}
 	if empty.Truncated {
@@ -450,6 +472,18 @@ func TestRealSessionIfPresent(t *testing.T) {
 				t.Errorf("incremental render from mid-file is not a suffix of the full render")
 			}
 
+			// Derive the leak check from the file itself rather than a fixed list:
+			// if the harness wrote system text into the session, the render must
+			// not reproduce it. A real session carries the system prompt, every
+			// skill description, and the user's own CLAUDE.md in its attachment
+			// records, and none of that may reach a pull request.
+			raw := string(data)
+			for _, needle := range []string{"system-reminder", "systemPrompt", "<total_tokens>"} {
+				if strings.Contains(raw, needle) && strings.Contains(full.Markdown, needle) {
+					t.Errorf("%q is in the raw session and reached the rendered transcript", needle)
+				}
+			}
+
 			t.Logf("%s: %d records -> %d bytes of Markdown", filepath.Base(path), len(records), len(full.Markdown))
 		})
 	}
@@ -475,5 +509,35 @@ func TestGoldenRender(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Errorf("rendered transcript differs from %s\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
+	}
+}
+
+// The single highest-consequence invariant in the pipeline. A real session's
+// attachment records carry the whole system prompt, every skill description, and
+// the user's own ~/.claude/CLAUDE.md. All of it must stay out of a transcript
+// that gets pushed to a pull request, so this pins the guarantee against the
+// fixture rather than against whatever happens to be on the machine.
+func TestGuardrail_SystemPromptAndInstructionsNeverRendered(t *testing.T) {
+	out := render(t, loadFixture(t), "", Options{})
+
+	for _, marker := range []string{
+		"LEAKMARK-ENVIRONMENT",
+		"LEAKMARK-INSTRUCTIONS",
+		"LEAKMARK-SYSTEMPROMPT",
+		"LEAKMARK-SKILLS",
+	} {
+		if strings.Contains(out, marker) {
+			t.Errorf("%s reached the rendered transcript", marker)
+		}
+	}
+	// The wrapper is as dangerous as the payload: system-reminder text is
+	// injected by the harness, never written by a person, and it is the shape
+	// any newly added attachment type will arrive in.
+	if strings.Contains(out, "system-reminder") {
+		t.Errorf("system-reminder text reached the rendered transcript:\n%s", out)
+	}
+	// Same guarantee for the default thinking-excluded path.
+	if withThinking := render(t, loadFixture(t), "", Options{IncludeThinking: true}); strings.Contains(withThinking, "LEAKMARK-") {
+		t.Errorf("IncludeThinking must not drag system content in:\n%s", withThinking)
 	}
 }

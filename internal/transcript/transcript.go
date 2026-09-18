@@ -162,9 +162,22 @@ func writeRecord(out *strings.Builder, r Record, opts Options) {
 	case "assistant":
 		writeAssistantTurn(out, r, opts)
 	default:
-		// attachment, mode, permission-mode, atis-latch, queue-operation,
-		// file-history-*, last-prompt, system, and every type not yet
-		// invented: no output.
+		// Noise, and every type not yet invented: no output.
+		//
+		// This default is a security boundary, not just tidiness. A real
+		// session's attachment records carry the entire system prompt, every
+		// skill description, and the user's own ~/.claude/CLAUDE.md, wrapped in
+		// <system-reminder> blocks. Rendering them would push all of that into a
+		// pull request. Confirmed against a real session file: environment,
+		// model, deferred_tools_delta, agent_listing_delta, skill_listing,
+		// total_tokens_reminder, instructions, date, remote_session_change and
+		// prompt_snapshot all arrive as type "attachment" and all render to
+		// nothing.
+		//
+		// Do not add a case for an unknown type without checking what it
+		// contains on a real session first. Also skipped, and safe today for the
+		// same reason: mode, permission-mode, atis-latch, queue-operation,
+		// file-history-snapshot, file-history-delta, last-prompt, system.
 		return
 	}
 }
