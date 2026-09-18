@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/DnzzL/herdr-huddle/internal/github"
+	"github.com/DnzzL/herdr-huddle/internal/repo"
+	"github.com/DnzzL/herdr-huddle/internal/share"
 )
 
 // splitRepo feeds an API path, so a malformed slug must be rejected rather
@@ -97,5 +103,138 @@ func TestDefaultStoreUsesConfigDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "token")); err == nil {
 		t.Error("constructing the store must not create a token file")
+	}
+}
+
+// The share output is the whole of what the operator sees, so its wording is the
+// interface. A "created" branch that was reused, or a warning that got dropped,
+// changes what they do next.
+func TestPrintShareResult(t *testing.T) {
+	res := share.Result{
+		Repo:          repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"},
+		Slug:          "improve-pane",
+		Branch:        "herdr/improve-pane",
+		Base:          "main",
+		BaseRef:       "origin/main",
+		BranchCreated: true,
+		Pushed:        true,
+		PullRequest:   github.PullRequest{Number: 42, HTMLURL: "https://github.com/acme/demo/pull/42", Draft: true},
+		Allowlist:     []string{"operator", "bob"},
+		Warnings:      []string{"could not invite carol: needs admin rights"},
+	}
+	var buf bytes.Buffer
+	printShareResult(&buf, res)
+	got := buf.String()
+
+	for _, want := range []string{
+		"acme/demo",
+		"herdr/improve-pane (created)",
+		"main",
+		"origin/main",
+		"#42",
+		"https://github.com/acme/demo/pull/42",
+		"draft",
+		"created",
+		"operator bob",
+		"could not invite carol",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output is missing %q:\n%s", want, got)
+		}
+	}
+
+	// A reused share must not read as a new one: the difference is whether the
+	// operator expects a second thread to exist.
+	reused := res
+	reused.BranchCreated = false
+	reused.Reused = true
+	buf.Reset()
+	printShareResult(&buf, reused)
+	if !strings.Contains(buf.String(), "(reused)") {
+		t.Errorf("a reused share reads as new:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "(created)") {
+		t.Errorf("a reused share claims to be created:\n%s", buf.String())
+	}
+
+	// A dry run reports no pull request, so the line must not print "#0" against
+	// a URL that does not exist.
+	dry := res
+	dry.DryRun = true
+	dry.PullRequest = github.PullRequest{}
+	buf.Reset()
+	printShareResult(&buf, dry)
+	if strings.Contains(buf.String(), "#0") {
+		t.Errorf("a dry run printed a pull request number:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "would be opened") {
+		t.Errorf("a dry run does not say what would happen:\n%s", buf.String())
+	}
+}
+
+// The invite flag is repeatable and also accepts a comma-separated list.
+func TestStringListFlag(t *testing.T) {
+	var l stringList
+	for _, v := range []string{"bob", "@carol,dave", " ", "bob"} {
+		if err := l.Set(v); err != nil {
+			t.Fatalf("Set(%q): %v", v, err)
+		}
+	}
+	want := []string{"bob", "@carol", "dave", "bob"}
+	if len(l) != len(want) {
+		t.Fatalf("got %v, want %v", l, want)
+	}
+	for i := range want {
+		if l[i] != want[i] {
+			t.Errorf("l[%d] = %q, want %q", i, l[i], want[i])
+		}
+	}
+	if l.String() != strings.Join(want, ",") {
+		t.Errorf("String() = %q", l.String())
+	}
+}
+
+// A dry run needs no token, so it must not be blocked by a missing one: it is the
+// command an operator runs before authorizing anything.
+func TestRunShareDryRunNeedsNoToken(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+
+	dir := t.TempDir()
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=T", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=T", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	git("init", "-q", "-b", "work")
+	if err := os.WriteFile(filepath.Join(dir, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "-A")
+	git("commit", "-qm", "i")
+	git("remote", "add", "origin", "git@github.com:acme/demo.git")
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(wd) })
+
+	if err := runShare([]string{"--dry-run"}); err != nil {
+		t.Fatalf("a dry run must not require a token: %v", err)
+	}
+	// And it must not have recorded a share for the poller.
+	store := share.Store{Path: filepath.Join(os.Getenv("HERDR_PLUGIN_CONFIG_DIR"), "shares.json")}
+	if states, err := store.Load(); err != nil || len(states) != 0 {
+		t.Errorf("a dry run recorded shares: %v, %v", states, err)
 	}
 }

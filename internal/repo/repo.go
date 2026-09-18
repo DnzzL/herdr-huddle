@@ -178,7 +178,9 @@ func (r *Repo) EnsureBranch(ctx context.Context, branch, base, message string) (
 	if err := validateRef(base); err != nil {
 		return false, err
 	}
-	if r.refExists(ctx, "refs/heads/"+branch) || r.refExists(ctx, "refs/remotes/"+r.remote()+"/"+branch) {
+	if exists, err := r.BranchExists(ctx, branch); err != nil {
+		return false, err
+	} else if exists {
 		return false, nil
 	}
 
@@ -208,11 +210,30 @@ func (r *Repo) Push(ctx context.Context, branch string) error {
 	return err
 }
 
-// refExists asks git whether a ref resolves. A missing ref is an exit status
-// rather than a failure, so this has no error path.
-func (r *Repo) refExists(ctx context.Context, ref string) bool {
+// BranchExists reports whether the branch exists locally, or on the remote and
+// simply not checked out here. Both mean the share already exists.
+//
+// It is separate from EnsureBranch so that a dry run can report what would
+// happen without creating anything.
+func (r *Repo) BranchExists(ctx context.Context, branch string) (bool, error) {
+	if err := ValidateBranchName(branch); err != nil {
+		return false, err
+	}
+	local, err := r.RefExists(ctx, "refs/heads/"+branch)
+	if err != nil || local {
+		return local, err
+	}
+	return r.RefExists(ctx, "refs/remotes/"+r.remote()+"/"+branch)
+}
+
+// RefExists asks git whether a ref resolves. A missing ref is an exit status
+// rather than a failure, so only a failure to run git is an error.
+func (r *Repo) RefExists(ctx context.Context, ref string) (bool, error) {
 	_, _, code, err := r.runner().Run(ctx, r.Dir, []string{"rev-parse", "--verify", "--quiet", ref})
-	return err == nil && code == 0
+	if err != nil {
+		return false, err
+	}
+	return code == 0, nil
 }
 
 // Slug identifies a repository on a forge.

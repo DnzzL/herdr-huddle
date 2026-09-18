@@ -7,14 +7,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/DnzzL/herdr-huddle/internal/auth"
 	"github.com/DnzzL/herdr-huddle/internal/github"
+	"github.com/DnzzL/herdr-huddle/internal/repo"
+	"github.com/DnzzL/herdr-huddle/internal/share"
 )
 
 // clientID is the OAuth App client id, injected at build time:
@@ -54,6 +58,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "auth":
 		return runAuth(args[1:])
+	case "share":
+		return runShare(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -70,6 +76,7 @@ Usage:
   herdr-huddle auth login [--repo owner/name] [--public]
   herdr-huddle auth status
   herdr-huddle auth logout
+  herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
 
 Auth:
   login    Authorize with GitHub via the device flow and store the token.
@@ -77,7 +84,135 @@ Auth:
            --public forces the narrow public_repo scope.
   status   Report who the stored token belongs to.
   logout   Forget the stored token.
+
+Share:
+  share    Open the shared thread: an empty branch, pushed, with a draft pull
+           request on it. Running it again reuses the existing branch and pull
+           request rather than opening a second one.
+           --slug   the name after herdr/; defaults to the branch, or to the
+                    directory name when the branch is the default one.
+           --base   the branch the pull request targets; defaults to the
+                    remote's default branch.
+           --invite give a user read access and add them to the allowlist of
+                    comments that may drive the agent. Repeatable.
+           --dry-run  report what would happen and change nothing.
 `)
+}
+
+// runShare implements the share command.
+func runShare(args []string) error {
+	fs := flag.NewFlagSet("share", flag.ContinueOnError)
+	slug := fs.String("slug", "", "the name after herdr/ (default: derived from the branch)")
+	base := fs.String("base", "", "the branch the pull request targets (default: the remote's default branch)")
+	dryRun := fs.Bool("dry-run", false, "report what would happen and change nothing")
+	var invites stringList
+	fs.Var(&invites, "invite", "give a user read access and add them to the allowlist (repeatable, with or without @)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("%w: `share` takes no positional arguments, got %q", errUsage, fs.Arg(0))
+	}
+
+	ctx, stop := withSignals()
+	defer stop()
+
+	token := ""
+	if !*dryRun {
+		// A dry run needs no token: it makes no requests.
+		loaded, _, err := defaultStore().Load(ctx)
+		if err != nil {
+			return err
+		}
+		token = loaded
+	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	result, err := share.Open(ctx, &repo.Repo{Dir: dir}, &github.Client{Token: token}, share.Request{
+		Slug:   *slug,
+		Base:   *base,
+		Invite: invites,
+		DryRun: *dryRun,
+	})
+	// The result is printed even when Open failed, because a dry run or a
+	// partial share has already told the operator something useful.
+	if result.Branch != "" {
+		printShareResult(os.Stdout, result)
+	}
+	if err != nil {
+		return err
+	}
+
+	if result.DryRun {
+		fmt.Println("\nDry run: nothing was created, pushed or requested.")
+		return nil
+	}
+
+	// The poller reads this. A failure to record the share is reported but does
+	// not undo the pull request that now exists.
+	store := share.Store{Path: filepath.Join(configDir(), "shares.json")}
+	if err := store.Put(share.FromResult(result, time.Now())); err != nil {
+		return fmt.Errorf("the pull request is open, but recording it for the poller failed: %w", err)
+	}
+	return nil
+}
+
+// printShareResult reports what happened, in the order the pieces came into
+// existence, so a failure partway through is legible.
+func printShareResult(w io.Writer, res share.Result) {
+	verb := "created"
+	if res.Reused {
+		verb = "reused"
+	}
+	pr := fmt.Sprintf("#%d %s (%s, %s)", res.PullRequest.Number, res.PullRequest.HTMLURL, draftLabel(res.PullRequest.Draft), verb)
+	if res.DryRun {
+		pr = "would be opened"
+	}
+	base := res.Base
+	if base == "" {
+		base = "(unknown)"
+	}
+	branch := res.Branch + " (reused)"
+	if res.BranchCreated {
+		branch = res.Branch + " (created)"
+	}
+
+	fmt.Fprintf(w, "repo      %s\n", res.Repo)
+	fmt.Fprintf(w, "branch    %s\n", branch)
+	fmt.Fprintf(w, "base      %s  from %s\n", base, res.BaseRef)
+	fmt.Fprintf(w, "pull      %s\n", pr)
+	if len(res.Allowlist) > 0 {
+		fmt.Fprintf(w, "allowlist %s\n", strings.Join(res.Allowlist, " "))
+	}
+	for _, warning := range res.Warnings {
+		fmt.Fprintf(w, "warning   %s\n", warning)
+	}
+}
+
+func draftLabel(draft bool) string {
+	if draft {
+		return "draft"
+	}
+	return "ready"
+}
+
+// stringList collects a repeatable flag, and splits a comma-separated value so
+// --invite=bob,carol works too.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			*l = append(*l, part)
+		}
+	}
+	return nil
 }
 
 func runAuth(args []string) error {

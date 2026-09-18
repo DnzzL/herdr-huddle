@@ -32,8 +32,13 @@ these are worth pinning before the code exists.
   the agent session while a name is reassigned on rename and cleared on exit.
 - **Base**: the empty commit is cut from `origin`'s default branch, read from
   `refs/remotes/origin/HEAD`, so the PR's diff means "everything this workstream
-  does relative to upstream". Fall back to local `HEAD` with a printed warning
-  when `origin/HEAD` cannot be resolved. `--base <ref>` overrides.
+  does relative to upstream". `--base <ref>` overrides. When `origin/HEAD` cannot
+  be resolved — a repository set up with `git remote add` and `fetch` has none —
+  the commit is cut from local `HEAD` with a printed warning, *and* the PR's base
+  is taken from GitHub's own `default_branch`. A PR with no base is rejected with
+  a 422 that says nothing useful, after the branch has already been pushed, so
+  GitHub is asked before anything is created; if it cannot answer either, `share`
+  stops and asks for `--base`.
 - **No fetch.** `share` never touches the network for git. It uses the remote
   refs already present, so it cannot fail because a fetch was blocked or slow.
 - **Idempotent.** Re-running `share` with the same slug reuses the existing
@@ -44,7 +49,10 @@ these are worth pinning before the code exists.
   worse version of the same thing. `--dry-run` stops after printing.
 - `--invite @user` issues the `PUT .../collaborators/{user}` from ADR-001 once
   the PR exists, and reports the failure rather than hiding it when the operator
-  lacks admin rights.
+  lacks admin rights. The allowlist of comments that may drive the agent is the
+  operator's own login first, then each successful invitation: without the
+  operator on it, the person who owns the agent could not steer it from the PR,
+  which is the loop the whole thing exists for.
 
 ## Consequences
 
@@ -57,6 +65,27 @@ these are worth pinning before the code exists.
   derive the same slug share one PR. `--slug` is the escape hatch.
 - Pushing is irreversible only in the sense that a branch must be deleted; no
   history is rewritten, and the draft PR is closed rather than the branch forced.
+- The token is checked, and the operator's login read, before anything is
+  written; a share never leaves a pushed branch behind because authorization
+  failed. `--dry-run` is exempt, since it makes no requests.
+- The `default_branch` lookup is one extra request, on the fallback path only,
+  and skipped by `--dry-run` because a dry run makes no requests at all. A dry
+  run therefore reports the base as unknown when local refs cannot say.
+
+## Known gaps
+
+- not tested: no push and no pull request has ever run against GitHub. The
+  branch, empty commit, base selection, idempotency and push are exercised
+  against a local bare repository, and the API against a fake server.
+- not done: nothing reads `shares.json` yet, so the record `share` writes is
+  inert until the poller (P4) exists.
+- not done: the PR body is the placeholder `share` writes; the transcript splice
+  is P3.
+- unknown: whether a work-org installation permits collaborator invitations at
+  all. The failure is a warning by design, and the operator's own login on the
+  allowlist is what keeps the loop usable when it fails.
+- fragile: slug derivation on a repository whose default branch is checked out
+  produces `herdr/<dirname>`, which is a guess at intent.
 
 ## Alternatives rejected
 
