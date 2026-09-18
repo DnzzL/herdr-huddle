@@ -1,0 +1,13 @@
+id = "dnzzl.herdr-huddle"
+name = "Herdr Huddle"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Turn a live agent session into a GitHub draft PR two people can plan in"
+platforms = ["linux", "macos"]
+
+# Startup hooks are one-shot: they run once per enabled plugin after the session
+# is restored and the API socket is ready, and again when a new server takes over
+# during a live handoff. The poller has to outlive that, so the hook detaches it
+# and exits — see hooks/startup.sh and docs/adr/ADR-001.
+[[startup]]
+command = ["/bin/sh", "hooks/startup.sh"]
