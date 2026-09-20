@@ -41,37 +41,40 @@ func (t Turn) Digest() string {
 }
 
 // ReadTurn reads the session file and renders what the agent has said since
-// afterUUID.
-func ReadTurn(path, afterUUID string, opts transcript.Options) (Turn, error) {
-	records, err := readSession(path)
+// after. kind selects the agent's format; see readerFor.
+func ReadTurn(kind, path, after string, opts transcript.Options) (Turn, error) {
+	r, err := readerFor(kind)
 	if err != nil {
 		return Turn{}, err
 	}
-	res := transcript.Render(records, afterUUID, opts)
-	return Turn{Markdown: res.Markdown, Cursor: res.LastUUID, Rotated: res.Truncated}, nil
-}
-
-func readSession(path string) ([]transcript.Record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("thread: read session: %w", err)
+		return Turn{}, fmt.Errorf("thread: read session: %w", err)
 	}
-	records, err := transcript.Parse(data)
+	res, err := r.render(data, after, opts)
 	if err != nil {
-		return nil, fmt.Errorf("thread: parse session: %w", err)
+		return Turn{}, fmt.Errorf("thread: parse session: %w", err)
 	}
-	return records, nil
+	return Turn{Markdown: res.Markdown, Cursor: res.LastID, Rotated: res.Truncated}, nil
 }
 
 // EndCursor is the transcript position at the end of a session file, used to
 // prime a share's cursor so its first comment starts where the conversation is
 // now rather than replaying a session that began before the share existed.
-func EndCursor(path string) (string, error) {
-	records, err := readSession(path)
+func EndCursor(kind, path string) (string, error) {
+	r, err := readerFor(kind)
 	if err != nil {
 		return "", err
 	}
-	return transcript.LastUUID(records), nil
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("thread: read session: %w", err)
+	}
+	cursor, err := r.endCursor(data)
+	if err != nil {
+		return "", fmt.Errorf("thread: parse session: %w", err)
+	}
+	return cursor, nil
 }
 
 // SnapshotTurn is a terminal snapshot: the fallback for an agent whose

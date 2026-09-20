@@ -62,11 +62,12 @@ type Options struct {
 type Result struct {
 	// Markdown is the rendered transcript body.
 	Markdown string
-	// LastUUID is the cursor to pass as afterUUID on the next poll. It
+	// LastID is the cursor to pass as the `after` argument on the next poll. It
 	// advances past records that rendered nothing, so the poller never
-	// re-scans the same tail.
-	LastUUID string
-	// Truncated reports that afterUUID was not found in the records, so
+	// re-scans the same tail. Named for the record id rather than Claude
+	// Code's uuid: a pi record has an id and no uuid.
+	LastID string
+	// Truncated reports that the cursor was not found in the records, so
 	// Markdown is a full re-render and the caller should replace the body
 	// rather than append. A live file that has been rotated, truncated or
 	// rewritten lands here.
@@ -76,6 +77,9 @@ type Result struct {
 const (
 	maxToolResultLines = 20
 	maxToolResultRunes = 4000
+	// maxCompactionRunes caps a compaction summary. Measured on a real pi
+	// session: seven compactions, summaries of 14,716 to 44,259 characters.
+	maxCompactionRunes = 4000
 )
 
 // Parse decodes JSONL records. Lines that are not valid JSON are skipped: a
@@ -104,14 +108,14 @@ func Parse(data []byte) ([]Record, error) {
 	return records, nil
 }
 
-// LastUUID is the cursor at the end of a set of records: the last UUID that
+// LastID is the cursor at the end of a set of records: the last UUID that
 // Render would return after processing all of them.
 //
 // Used to prime a cursor before anything has been delivered. A share starts
 // from where the conversation is now, because a session file routinely
 // predates the share by hours and publishing that history would both misstate
 // the thread and overrun GitHub's comment limit.
-func LastUUID(records []Record) string {
+func LastID(records []Record) string {
 	for i := len(records) - 1; i >= 0; i-- {
 		if records[i].UUID != "" {
 			return records[i].UUID
@@ -162,7 +166,7 @@ func Render(records []Record, afterUUID string, opts Options) Result {
 
 	return Result{
 		Markdown:  Redact(strings.TrimLeft(out.String(), "\n")),
-		LastUUID:  last,
+		LastID:    last,
 		Truncated: truncated,
 	}
 }
@@ -320,13 +324,7 @@ func writeToolResults(out *strings.Builder, r Record) {
 		if body == "" {
 			continue
 		}
-		out.WriteString("\n")
-		// Indented rather than fenced: tool output can contain ``` and
-		// close a fence, which would let arbitrary content render as
-		// Markdown in the PR body.
-		for _, line := range indentBody(body) {
-			out.WriteString("    " + line + "\n")
-		}
+		writeIndentedBody(out, body)
 	}
 }
 
@@ -335,6 +333,17 @@ func writeToolResults(out *strings.Builder, r Record) {
 // Claude's Read format prefixes every line with a numeric gutter — so trimming
 // the body as a whole would strip the first line's gutter and misalign it
 // against the rest.
+// writeIndentedBody writes a tool result as an indented block. Indented rather
+// than fenced: tool output can contain ``` and close a fence, which would let
+// arbitrary content render as Markdown in the PR body. Both adapters go through
+// here so the property cannot hold in one format and not the other.
+func writeIndentedBody(out *strings.Builder, body string) {
+	out.WriteString("\n")
+	for _, line := range indentBody(body) {
+		out.WriteString("    " + line + "\n")
+	}
+}
+
 func trimBlankEdges(s string) string {
 	s = strings.TrimRight(s, " \t\r\n")
 	return strings.TrimLeft(s, "\r\n")
@@ -374,13 +383,21 @@ func toolResultText(raw json.RawMessage) string {
 }
 
 func truncate(s string) string {
-	// Count runes, not bytes: cutting mid-rune would emit invalid UTF-8 into
-	// the PR body.
-	runes := []rune(s)
-	if len(runes) <= maxToolResultRunes {
+	body, capped := capRunes(s, maxToolResultRunes)
+	if !capped {
 		return s
 	}
-	return string(runes[:maxToolResultRunes]) + "\n… (truncated)"
+	return body + "\n… (truncated)"
+}
+
+// capRunes cuts a string to at most max runes. Runes, not bytes: cutting
+// mid-rune would emit invalid UTF-8 into the PR body.
+func capRunes(s string, max int) (string, bool) {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s, false
+	}
+	return string(runes[:max]), true
 }
 
 // contentBlocks returns the content array, if the content is an array.

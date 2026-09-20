@@ -233,11 +233,139 @@ func TestNewestForCWD_SkipsDirectoriesAndUnreadableFiles(t *testing.T) {
 	}
 	want := transcript(t, home, "-work-repo", "real", "/work/repo", "id", time.Now())
 
-	got, err := newestForCWD(home, "/work/repo")
+	got, err := newestForCWD(home, herdr.KindClaude, "/work/repo")
 	if err != nil {
 		t.Fatalf("newestForCWD: %v", err)
 	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// piTranscript builds a small session file the way pi writes one: the first
+// line is the session record, which carries both the cwd and the id.
+func piTranscript(t *testing.T, home, project, name, cwd, id string, mod time.Time) string {
+	t.Helper()
+	dir := filepath.Join(home, ".pi", "agent", "sessions", project)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name+".jsonl")
+	body := fmt.Sprintf(
+		"{\"type\":\"session\",\"version\":3,\"id\":%q,\"timestamp\":\"2026-09-20T09:59:00.000Z\",\"cwd\":%q}\n"+
+			"{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,\"timestamp\":\"2026-09-20T10:00:00.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+		id, cwd)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestResolve_FindsAPiSessionAndNamesItsAdapter(t *testing.T) {
+	home := t.TempDir()
+	want := piTranscript(t, home, "--work-repo--", "2026-09-20T09-59-00-000Z_01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", "/work/repo", "01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", time.Now())
+
+	got, err := Resolve(home, herdr.Agent{Agent: herdr.KindPi, CWD: "/work/repo", PaneID: "w1:p1"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Path != want {
+		t.Errorf("Path = %q, want the pi session recording %q", got.Path, "/work/repo")
+	}
+	if got.Kind != herdr.KindPi {
+		t.Errorf("Kind = %q, want %q so the pi adapter reads it", got.Kind, herdr.KindPi)
+	}
+	if got.Partial {
+		t.Errorf("got a partial source for a session file that exists: %+v", got)
+	}
+}
+
+func TestResolve_PiIsFoundBySessionIDDespiteTheTimestampPrefix(t *testing.T) {
+	// pi names its files <timestamp>_<id>.jsonl, so an id is not the whole name.
+	home := t.TempDir()
+	want := piTranscript(t, home, "--work-repo--", "2026-09-20T09-59-00-000Z_01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", "/work/repo", "01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", time.Now())
+	agent := herdr.Agent{
+		Agent: herdr.KindPi, CWD: "/work/elsewhere", PaneID: "w1:p1",
+		Session: &herdr.AgentSession{Agent: "pi", Kind: herdr.SessionKindID, Value: "01a0ae5c-7228-70e3-9e63-2e82dacc2a2c"},
+	}
+
+	got, err := Resolve(home, agent)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Path != want || got.Kind != herdr.KindPi {
+		t.Errorf("got %+v, want the pi session named by the id", got)
+	}
+}
+
+func TestResolve_EachKindLooksOnlyInItsOwnRoot(t *testing.T) {
+	// A file the other agent wrote is not this agent's conversation. Reading it
+	// would publish the wrong session — the reason the kind decides first.
+	home := t.TempDir()
+	piTranscript(t, home, "--work-repo--", "2026-09-20T09-59-00-000Z_01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", "/work/repo", "01a0ae5c", time.Now())
+
+	got, err := Resolve(home, herdr.Agent{Agent: herdr.KindClaude, CWD: "/work/repo", PaneID: "w1:p1"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Path != "" || !got.Partial {
+		t.Errorf("got %+v, want the terminal fallback rather than pi's session", got)
+	}
+}
+
+func TestResolve_AnUnknownKindIsTheTerminalAndNamesTheKind(t *testing.T) {
+	// A file that exists is not enough: without an adapter there is no parser,
+	// and a parser that does not know the records renders nothing at all.
+	home := t.TempDir()
+	piTranscript(t, home, "--work-repo--", "2026-09-20T09-59-00-000Z_01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", "/work/repo", "01a0ae5c", time.Now())
+
+	got, err := Resolve(home, herdr.Agent{Agent: "some-new-agent", CWD: "/work/repo", PaneID: "w1:p1"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Path != "" || !got.Partial {
+		t.Errorf("got %+v, want the terminal fallback", got)
+	}
+	if !strings.Contains(got.Reason, "some-new-agent") {
+		t.Errorf("Reason = %q, want it to name the kind with no adapter", got.Reason)
+	}
+	if got.Kind != "" {
+		t.Errorf("Kind = %q, want empty so no adapter is claimed for the fallback", got.Kind)
+	}
+}
+
+func TestResolve_AnAgentReportingNoKindIsNotGuessedAt(t *testing.T) {
+	// Claude is the fallback for a *recorded share* that predates the second
+	// adapter, because that is a fact about what it was. An agent that reports
+	// no kind is a different thing: nothing is known about what is writing that
+	// terminal, so its transcript is the terminal.
+	home := t.TempDir()
+	transcript(t, home, "-work-repo", "s", "/work/repo", "id", time.Now())
+
+	got, err := Resolve(home, herdr.Agent{CWD: "/work/repo", PaneID: "w1:p1"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Path != "" || !got.Partial {
+		t.Errorf("got %+v, want the terminal fallback", got)
+	}
+	if !strings.Contains(got.Reason, "none reported") {
+		t.Errorf("Reason = %q, want it to say the agent reported no kind", got.Reason)
+	}
+}
+
+func TestSessionID_OfAPiSession(t *testing.T) {
+	home := t.TempDir()
+	path := piTranscript(t, home, "--work-repo--", "2026-09-20T09-59-00-000Z_x", "/work/repo", "01a0ae5c-7228-70e3-9e63-2e82dacc2a2c", time.Now())
+
+	got, err := SessionID(path)
+	if err != nil {
+		t.Fatalf("SessionID: %v", err)
+	}
+	if got != "01a0ae5c-7228-70e3-9e63-2e82dacc2a2c" {
+		t.Errorf("SessionID = %q, want pi's session record id", got)
 	}
 }

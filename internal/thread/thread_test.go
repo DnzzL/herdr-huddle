@@ -225,7 +225,7 @@ func assistantRecord(uuid, text string) string {
 func TestReadTurn_DeliversOnlyWhatIsNew(t *testing.T) {
 	path := writeSession(t, userRecord("u1", "hello"), assistantRecord("a1", "hi there"))
 
-	all, err := ReadTurn(path, "", transcript.Options{})
+	all, err := ReadTurn("claude", path, "", transcript.Options{})
 	if err != nil {
 		t.Fatalf("ReadTurn: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestReadTurn_DeliversOnlyWhatIsNew(t *testing.T) {
 
 	// A second read from that cursor has nothing new, which is what stops the
 	// poller from posting the same turn every 10s.
-	again, err := ReadTurn(path, all.Cursor, transcript.Options{})
+	again, err := ReadTurn("claude", path, all.Cursor, transcript.Options{})
 	if err != nil {
 		t.Fatalf("ReadTurn: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestReadTurn_DeliversOnlyWhatIsNew(t *testing.T) {
 func TestReadTurn_RotationIsReportedNotPublished(t *testing.T) {
 	path := writeSession(t, assistantRecord("a1", "fresh session"))
 
-	got, err := ReadTurn(path, "uuid-from-a-file-that-is-gone", transcript.Options{})
+	got, err := ReadTurn("claude", path, "uuid-from-a-file-that-is-gone", transcript.Options{})
 	if err != nil {
 		t.Fatalf("ReadTurn: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestReadTurn_RotationIsReportedNotPublished(t *testing.T) {
 }
 
 func TestReadTurn_MissingFileIsAnError(t *testing.T) {
-	if _, err := ReadTurn(filepath.Join(t.TempDir(), "gone.jsonl"), "", transcript.Options{}); err == nil {
+	if _, err := ReadTurn("claude", filepath.Join(t.TempDir(), "gone.jsonl"), "", transcript.Options{}); err == nil {
 		t.Fatal("want an error for a missing session file")
 	}
 }
@@ -268,7 +268,7 @@ func TestReadTurn_MissingFileIsAnError(t *testing.T) {
 func TestEndCursor_IsTheEndOfTheConversation(t *testing.T) {
 	path := writeSession(t, userRecord("u1", "hello"), assistantRecord("a1", "hi"), userRecord("u2", "and again"))
 
-	got, err := EndCursor(path)
+	got, err := EndCursor("claude", path)
 	if err != nil {
 		t.Fatalf("EndCursor: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestEndCursor_IsTheEndOfTheConversation(t *testing.T) {
 	}
 
 	// Priming with it must mean the existing conversation is not replayed.
-	turn, err := ReadTurn(path, got, transcript.Options{})
+	turn, err := ReadTurn("claude", path, got, transcript.Options{})
 	if err != nil {
 		t.Fatalf("ReadTurn: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestEndCursor_IsTheEndOfTheConversation(t *testing.T) {
 func TestEndCursor_TrailingRecordsWithoutUUIDs(t *testing.T) {
 	path := writeSession(t, assistantRecord("a1", "hi"), `{"type":"summary","timestamp":"2026-09-18T10:00:02Z"}`)
 
-	got, err := EndCursor(path)
+	got, err := EndCursor("claude", path)
 	if err != nil {
 		t.Fatalf("EndCursor: %v", err)
 	}
@@ -365,5 +365,90 @@ func TestTurn_DigestTracksContent(t *testing.T) {
 	}
 	if SnapshotTurn("").Digest() == a.Digest() {
 		t.Error("empty and non-empty content share a digest")
+	}
+}
+
+// piSession writes a session file the way pi does: a session record first, then
+// message records whose role decides how they render.
+func piSession(t *testing.T, records ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "2026-09-20T09-59-00-000Z_x.jsonl")
+	header := `{"type":"session","version":3,"id":"x","timestamp":"2026-09-20T09:59:00.000Z","cwd":"/work/repo"}`
+	body := strings.Join(append([]string{header}, records...), "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func piHuman(id, text string) string {
+	return fmt.Sprintf(`{"type":"message","id":%q,"parentId":"p","timestamp":"2026-09-20T10:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":%q}]}}`, id, text)
+}
+
+func piAssistant(id, text string) string {
+	return fmt.Sprintf(`{"type":"message","id":%q,"parentId":"p","timestamp":"2026-09-20T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, id, text)
+}
+
+func TestReadTurn_ReadsAPiSessionWithThePiAdapter(t *testing.T) {
+	path := piSession(t, piHuman("u1", "hello"), piAssistant("a1", "hi there"))
+
+	got, err := ReadTurn("pi", path, "", transcript.Options{})
+	if err != nil {
+		t.Fatalf("ReadTurn: %v", err)
+	}
+	if !strings.Contains(got.Markdown, "hi there") || !strings.Contains(got.Markdown, "hello") {
+		t.Errorf("Markdown = %q, want both turns", got.Markdown)
+	}
+	if got.Cursor != "a1" {
+		t.Errorf("Cursor = %q, want pi's record id", got.Cursor)
+	}
+
+	again, err := ReadTurn("pi", path, got.Cursor, transcript.Options{})
+	if err != nil {
+		t.Fatalf("ReadTurn: %v", err)
+	}
+	if !again.Empty() {
+		t.Errorf("Markdown = %q, want nothing new", again.Markdown)
+	}
+}
+
+func TestReadTurn_TheWrongAdapterIsSilenceSoItIsRefused(t *testing.T) {
+	// Reading a pi file with the Claude adapter renders nothing rather than
+	// failing, which is the failure mode nobody notices. An unknown kind has to
+	// be an error, not the empty string and a quiet poll.
+	if _, err := ReadTurn("some-new-agent", piSession(t, piAssistant("a1", "hi")), "", transcript.Options{}); err == nil {
+		t.Fatal("want an error for an agent kind with no adapter")
+	}
+}
+
+func TestReadTurn_AKindlessShareIsStillClaude(t *testing.T) {
+	// A share recorded before there was a second adapter has no kind stored.
+	path := writeSession(t, assistantRecord("a1", "hi"))
+
+	got, err := ReadTurn("", path, "", transcript.Options{})
+	if err != nil {
+		t.Fatalf("ReadTurn: %v", err)
+	}
+	if !strings.Contains(got.Markdown, "hi") {
+		t.Errorf("Markdown = %q, want the Claude adapter to read a kindless share", got.Markdown)
+	}
+}
+
+func TestEndCursor_OfAPiSession(t *testing.T) {
+	path := piSession(t, piHuman("u1", "hello"), piAssistant("a1", "hi"))
+
+	got, err := EndCursor("pi", path)
+	if err != nil {
+		t.Fatalf("EndCursor: %v", err)
+	}
+	if got != "a1" {
+		t.Errorf("EndCursor = %q, want pi's last record id", got)
+	}
+	turn, err := ReadTurn("pi", path, got, transcript.Options{})
+	if err != nil {
+		t.Fatalf("ReadTurn: %v", err)
+	}
+	if !turn.Empty() {
+		t.Errorf("a freshly primed share replayed %q", turn.Markdown)
 	}
 }

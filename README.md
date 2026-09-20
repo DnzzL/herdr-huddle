@@ -17,7 +17,9 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
 - Go 1.26+ to build it.
 - A GitHub **OAuth App** you create yourself (below). One per user, not one per
   share.
-- An agent running in a Herdr pane that the share is opened from.
+- An agent running in a Herdr pane that the share is opened from. `pi` and
+  Claude Code have a transcript adapter; any other agent works, and its
+  transcript comes from the pane's terminal and is labelled as such.
 
 ## Set it up
 
@@ -93,13 +95,15 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
 - **`/agent` text is untrusted input.** The prompt that carries it says so, and
   carries the author's login. That is a defence, not a sandbox: an agent that
   obeys a comment can still do anything you could do.
-- **The transcript comes from the agent's own session file.** Herdr does not
-  report one for every agent kind. When it cannot be found, this falls back to
+- **The transcript comes from the agent's own session file**, read by an
+  adapter for that agent kind (`pi` or Claude Code). Herdr does not report a
+  session for every kind, and there is no adapter for the ones it does not. When
+  no file can be found, this falls back to
   reading the pane's terminal and labels the comment as a partial transcript —
   readable, but with no cursor for incremental sync and collapsed tool calls.
 - **No comment has ever been posted to a real GitHub pull request by a test.**
   The API is exercised against a fake server and the git side against a local
-  bare repository. See `## Known gaps` in ADR-002.
+  bare repository. See `## Known gaps` in ADR-002 and ADR-004.
 
 ## Commands
 

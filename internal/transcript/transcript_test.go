@@ -236,8 +236,8 @@ func TestProperty7_IncrementalFromLastUUID(t *testing.T) {
 	if full.Truncated {
 		t.Errorf("a full render must not report Truncated")
 	}
-	if want := records[len(records)-1].UUID; full.LastUUID != want {
-		t.Errorf("LastUUID = %q, want %q", full.LastUUID, want)
+	if want := records[len(records)-1].UUID; full.LastID != want {
+		t.Errorf("LastID = %q, want %q", full.LastID, want)
 	}
 
 	// Render from the 6th record's uuid: the first five must not reappear.
@@ -249,8 +249,8 @@ func TestProperty7_IncrementalFromLastUUID(t *testing.T) {
 	mustNotContain(t, inc.Markdown, "Add a --json flag to the status command")
 	mustNotContain(t, inc.Markdown, "Reading the current status command first.")
 	mustContain(t, inc.Markdown, "undefined: jsonOut")
-	if want := records[len(records)-1].UUID; inc.LastUUID != want {
-		t.Errorf("incremental LastUUID = %q, want %q", inc.LastUUID, want)
+	if want := records[len(records)-1].UUID; inc.LastID != want {
+		t.Errorf("incremental LastID = %q, want %q", inc.LastID, want)
 	}
 
 	// The incremental tail must be the tail of the full render, so repeated
@@ -281,8 +281,8 @@ func TestProperty7_IncrementalFromLastUUID(t *testing.T) {
 	if strings.TrimSpace(empty.Markdown) != "" {
 		t.Errorf("only noise records follow, expected no new output, got:\n%s", empty.Markdown)
 	}
-	if want := records[len(records)-1].UUID; empty.LastUUID != want {
-		t.Errorf("cursor must advance past non-rendering records: LastUUID = %q, want %q", empty.LastUUID, want)
+	if want := records[len(records)-1].UUID; empty.LastID != want {
+		t.Errorf("cursor must advance past non-rendering records: LastID = %q, want %q", empty.LastID, want)
 	}
 	if empty.Truncated {
 		t.Errorf("must not report Truncated when the uuid was found")
@@ -453,7 +453,7 @@ func TestRealSessionIfPresent(t *testing.T) {
 			}
 
 			full := Render(records, "", Options{})
-			if full.LastUUID == "" {
+			if full.LastID == "" {
 				t.Errorf("no cursor produced from %d records", len(records))
 			}
 			if again := Render(records, "", Options{}).Markdown; again != full.Markdown {

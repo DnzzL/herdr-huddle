@@ -734,3 +734,105 @@ func (b *blinkingHerdr) Read(ctx context.Context, target string, lines int) (str
 func (b *blinkingHerdr) Prompt(ctx context.Context, target, text string) error {
 	return b.inner.Prompt(ctx, target, text)
 }
+
+// piRecord shapes a pi session: a separate record per tool result, an id per
+// record, and the cwd on the first line.
+func piHeader(cwd string) string {
+	return fmt.Sprintf(`{"type":"session","version":3,"id":"s1","timestamp":"2026-09-18T09:00:00.000Z","cwd":%q}`, cwd)
+}
+
+func piAssistantRecord(id, text string) string {
+	return fmt.Sprintf(`{"type":"message","id":%q,"parentId":"p","timestamp":"2026-09-18T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, id, text)
+}
+
+// piHarness is a harness whose pane runs pi: its session lives under pi's own
+// root, and the share records that its transcript is a pi one.
+func piHarness(t *testing.T, records ...string) *harness {
+	t.Helper()
+	h := newHarness(t)
+	dir := filepath.Join(h.root, ".pi", "agent", "sessions", "-work")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "2026-09-18T09-00-00-000Z_s1.jsonl")
+	write(path, append([]string{piHeader("/work")}, records...))
+
+	h.path = path
+	h.herdr.agents[0].Agent = herdr.KindPi
+	st := h.state()
+	st.Origin.Session = path
+	st.Origin.Kind = herdr.KindPi
+	h.put(st)
+	return h
+}
+
+func TestOnce_SyncsAPiSessionThroughThePiAdapter(t *testing.T) {
+	// The whole point of the adapter: on a machine whose agents are all pi, a
+	// share has to publish what the agent actually said. The Claude adapter
+	// recognises none of these records, so a wrong adapter here is silence.
+	h := piHarness(t, piAssistantRecord("a1", "I will start with the lexer"))
+	h.put(withCursor(h.state(), ""))
+
+	h.once()
+
+	if len(h.forge.created) != 1 {
+		t.Fatalf("posted %d comments, want 1: %v", len(h.forge.created), h.forge.created)
+	}
+	if !strings.Contains(h.forge.created[0], "I will start with the lexer") {
+		t.Errorf("comment = %q, want the pi turn", h.forge.created[0])
+	}
+	if got := h.load()[0].Cursors.Transcript; got != "a1" {
+		t.Errorf("cursor = %q, want pi's record id", got)
+	}
+}
+
+func TestOnce_ReResolvesWhenThePaneRunsADifferentAgent(t *testing.T) {
+	// A pane outlives the agent that opened the share. The old file is another
+	// agent's format, so it has to be looked up again rather than parsed.
+	h := newHarness(t)
+	// The share was opened when the pane ran Claude Code, and Claude's session
+	// file is still on disk.
+	h.put(h.state())
+
+	// Now the pane runs pi, with its own session for the same directory.
+	dir := filepath.Join(h.root, ".pi", "agent", "sessions", "-work")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	piPath := filepath.Join(dir, "2026-09-18T09-00-00-000Z_s1.jsonl")
+	write(piPath, []string{piHeader("/work"), piAssistantRecord("p1", "now I am pi")})
+	h.herdr.agents[0].Agent = herdr.KindPi
+
+	h.once()
+
+	if len(h.forge.created) != 1 || !strings.Contains(h.forge.created[0], "now I am pi") {
+		t.Fatalf("posted %v, want the pi session's turn", h.forge.created)
+	}
+	st := h.load()[0]
+	if st.Origin.Session != piPath || st.Origin.Kind != herdr.KindPi {
+		t.Errorf("origin = %+v, want the pi session recorded", st.Origin)
+	}
+}
+
+func TestOnce_AKindlessShareIsNotReResolved(t *testing.T) {
+	// A share opened before there was a second adapter has no kind stored. It
+	// was Claude Code, and re-resolving it would throw away its cursor and
+	// repost the whole conversation.
+	h := newHarness(t, userRecord("u1", "the old conversation"), assistantRecord("a1", "and the old answer"))
+	st := withCursor(h.state(), "a1")
+	h.put(st)
+
+	h.once()
+
+	if len(h.forge.created) != 0 {
+		t.Errorf("posted %v, want nothing: the cursor is already at the end of the file", h.forge.created)
+	}
+	if got := h.load()[0].Cursors.Transcript; got != "a1" {
+		t.Errorf("cursor = %q, want it kept", got)
+	}
+}
+
+func withCursor(st share.State, cursor string) share.State {
+	st.Cursors.Transcript = cursor
+	return st
+}

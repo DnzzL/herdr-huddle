@@ -57,6 +57,11 @@ type Origin struct {
 	CWD string `json:"cwd,omitempty"`
 	// Session is the transcript file. Empty when the agent has none.
 	Session string `json:"session,omitempty"`
+	// Kind is the agent kind that wrote Session, and so the adapter that reads
+	// it. Recorded because a pane can outlive the agent that opened the share:
+	// if the kind changes, the old file is another agent's format and has to be
+	// re-resolved rather than parsed.
+	Kind string `json:"kind,omitempty"`
 	// SessionID is the id recorded inside the session file, which survives the
 	// file being moved.
 	SessionID string `json:"session_id,omitempty"`

@@ -284,7 +284,7 @@ func (p *Poller) publish(ctx context.Context, st *share.State, agent herdr.Agent
 			return nil
 		}
 	} else {
-		turn, err = thread.ReadTurn(src.Path, st.Cursors.Transcript, transcript.Options{IncludeThinking: p.Options.IncludeThinking})
+		turn, err = thread.ReadTurn(src.Kind, src.Path, st.Cursors.Transcript, transcript.Options{IncludeThinking: p.Options.IncludeThinking})
 		if err != nil {
 			return err
 		}
@@ -329,9 +329,17 @@ func (p *Poller) publish(ctx context.Context, st *share.State, agent herdr.Agent
 func (p *Poller) source(st *share.State, agent herdr.Agent) (session.Source, error) {
 	if st.Origin.Session != "" {
 		if _, err := os.Stat(st.Origin.Session); err == nil {
-			return session.Source{Path: st.Origin.Session}, nil
+			if sameAdapter(st.Origin.Kind, agent.Agent) {
+				return session.Source{Path: st.Origin.Session, Kind: st.Origin.Kind}, nil
+			}
+			// The pane is running a different agent now, so the file left behind
+			// is another agent's format. A parser that does not recognise it
+			// renders nothing at all, and silence is the one failure nobody
+			// notices, so the transcript is looked up again instead.
+			p.logf("poll: %s: %s now runs %s, looking for its session", st.Branch, agent.PaneID, agent.Label())
+		} else {
+			p.logf("poll: %s: session file %s is gone, looking for a new one", st.Branch, st.Origin.Session)
 		}
-		p.logf("poll: %s: session file %s is gone, looking for a new one", st.Branch, st.Origin.Session)
 		st.Origin.Session = ""
 		// A new session is a new conversation: the old cursor names a record
 		// that is not in it, and holding on to it would silently drop the new
@@ -344,6 +352,7 @@ func (p *Poller) source(st *share.State, agent herdr.Agent) (session.Source, err
 		return session.Source{}, err
 	}
 	st.Origin.Session = src.Path
+	st.Origin.Kind = src.Kind
 	st.Origin.Partial = src.Partial
 	if src.Path != "" {
 		if id, err := session.SessionID(src.Path); err == nil {
@@ -351,6 +360,20 @@ func (p *Poller) source(st *share.State, agent herdr.Agent) (session.Source, err
 		}
 	}
 	return src, nil
+}
+
+// sameAdapter reports whether two agent kinds are read by the same transcript
+// adapter. A share recorded before there was a second adapter has no kind
+// stored, and Claude Code was the only one there was — comparing the kinds as
+// stored would re-resolve those shares on every pass and lose their cursor.
+func sameAdapter(a, b string) bool {
+	if a == "" {
+		a = herdr.KindClaude
+	}
+	if b == "" {
+		b = herdr.KindClaude
+	}
+	return a == b
 }
 
 // deliver reads the thread and types anything allowed into the agent.

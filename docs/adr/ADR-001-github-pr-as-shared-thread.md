@@ -40,13 +40,17 @@ time — before any code exists**. One object carries three phases:
 - **Transcript → PR comments**, one per completed agent turn. The PR body is a
   header written once at `share` time. **Amended by ADR-003**: a rewritten body
   notifies nobody, and the API rejects bodies past 65,536 characters. Source, in
-  order: Claude Code session JSONL
-  (`~/.claude/projects/<slug>/<session-uuid>.jsonl`, where the path is handed
+  order: the agent's own session JSONL, read by an adapter chosen by the agent
+  kind Herdr reports (`pi` → `~/.pi/agent/sessions/<slug>/<timestamp>_<id>.jsonl`,
+  `claude` → `~/.claude/projects/<slug>/<session-uuid>.jsonl`, where the path is
+  handed
   over by `herdr agent list` as `agent_session.value` when
   `agent_session.kind` is `path`, and the UUID when it is `id`; in practice no
   agent on this machine reports one at all, so the session is also located by
   the pane's working directory), falling back to `herdr agent read` for other
-  agents and marked in the thread as a partial terminal snapshot.
+  agents and marked in the thread as a partial terminal snapshot. **Amended by
+  ADR-004**: one adapter per agent kind, and an agent kind with no adapter is
+  read from the terminal rather than guessed at.
 - **Comments → agent**: poll the PR comment endpoints every 10s with ETag
   (304s do not count against the 5000/h REST quota). A comment is injected via
   `herdr agent prompt` only if it passes **all three**: an `/agent` prefix, an
@@ -76,7 +80,9 @@ time — before any code exists**. One object carries three phases:
   this is a hard limit — document it, do not work around it.
 - Scope `repo` is broad, but only **one** person authenticates (the host), and
   the token never leaves their machine. No multi-tenant token store exists.
-- The Claude-specific JSONL path is undocumented and may break on a Claude Code
+- The JSONL path is undocumented for both agent kinds and may break on a minor
+  release. The adapters are covered by tests and the failure is loud — a file
+  whose records do not parse is reported, not silently skipped.
   release. Mitigated by defensive parsing plus automatic fallback to the
   degraded `agent read` path, which is built anyway.
 

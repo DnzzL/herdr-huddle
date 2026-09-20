@@ -289,13 +289,13 @@ func TestSeedTranscriptStartsAtTheEndOfTheSession(t *testing.T) {
 
 	// Opening a share must not dump the conversation the operator has already
 	// had into the thread.
-	if got := seedTranscript(path); got != "a1" {
+	if got := seedTranscript("claude", path); got != "a1" {
 		t.Errorf("seedTranscript = %q, want the last record's uuid", got)
 	}
-	if got := seedTranscript(""); got != "" {
+	if got := seedTranscript("claude", ""); got != "" {
 		t.Errorf("seedTranscript(\"\") = %q, want the empty cursor", got)
 	}
-	if got := seedTranscript(filepath.Join(t.TempDir(), "gone.jsonl")); got != "" {
+	if got := seedTranscript("claude", filepath.Join(t.TempDir(), "gone.jsonl")); got != "" {
 		t.Errorf("seedTranscript of a missing file = %q, want the empty cursor so the poller decides", got)
 	}
 }
@@ -418,5 +418,26 @@ func TestRunPollRejectsPositionalArguments(t *testing.T) {
 	err := runPoll([]string{"extra"})
 	if !errors.Is(err, errUsage) {
 		t.Errorf("err = %v, want a usage error", err)
+	}
+}
+
+func TestSeedTranscriptOfAPiSession(t *testing.T) {
+	// The seed is where the share's first comment starts, so it has to be read
+	// with the adapter that matches the file.
+	path := filepath.Join(t.TempDir(), "2026-09-18T09-00-00-000Z_s1.jsonl")
+	records := `{"type":"session","version":3,"id":"s1","cwd":"/work"}
+{"type":"message","id":"a1","parentId":"p","message":{"role":"assistant","content":[{"type":"text","text":"already said"}]}}
+`
+	if err := os.WriteFile(path, []byte(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := seedTranscript("pi", path); got != "a1" {
+		t.Errorf("seedTranscript = %q, want pi's last record id", got)
+	}
+	// The wrong adapter has no records it understands, so a seed taken with it
+	// would silently be empty and the share would replay the conversation.
+	if got := seedTranscript("claude", path); got != "s1" {
+		t.Logf("claude adapter seeded %q (its last id-bearing record); the point is that pi's seed is not empty", got)
 	}
 }

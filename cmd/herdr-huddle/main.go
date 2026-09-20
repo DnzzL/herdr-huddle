@@ -175,7 +175,7 @@ func runShare(args []string) error {
 	}
 
 	store := share.Store{Path: filepath.Join(configDir(), "shares.json")}
-	state, resumed, err := store.Record(share.FromResult(result, time.Now()), seedTranscript(origin.Session))
+	state, resumed, err := store.Record(share.FromResult(result, time.Now()), seedTranscript(origin.Kind, origin.Session))
 	if err != nil {
 		return fmt.Errorf("the pull request is open, but recording it for the poller failed: %w", err)
 	}
@@ -232,6 +232,7 @@ func localOrigin(ctx context.Context) (share.Origin, []string) {
 	// Record how the transcript was found even when it was not, so the share
 	// says the same thing the poller will say on its first pass.
 	origin.Session = src.Path
+	origin.Kind = src.Kind
 	origin.Partial = src.Partial
 	if src.Path != "" {
 		origin.SessionID, _ = session.SessionID(src.Path)
@@ -243,11 +244,11 @@ func localOrigin(ctx context.Context) (share.Origin, []string) {
 // seedTranscript is where a brand new share's transcript cursor starts: the end
 // of the session, so opening a share does not dump the conversation the
 // operator has already had into the thread.
-func seedTranscript(path string) string {
+func seedTranscript(kind, path string) string {
 	if path == "" {
 		return ""
 	}
-	cursor, err := thread.EndCursor(path)
+	cursor, err := thread.EndCursor(kind, path)
 	if err != nil {
 		return ""
 	}

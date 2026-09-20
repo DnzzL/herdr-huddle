@@ -88,6 +88,14 @@ type Agent struct {
 	Session       *AgentSession `json:"agent_session"`
 }
 
+// Agent kinds, as herdr reports them in Agent.Agent. A kind with a transcript
+// adapter behind it is listed here; every other kind is read from the terminal.
+// See ADR-004.
+const (
+	KindClaude = "claude"
+	KindPi     = "pi"
+)
+
 // Agent status, as herdr reports it. The poller's behaviour depends on these
 // values: a turn is published once the agent is no longer working, and an
 // instruction is held back rather than typed into a busy terminal.

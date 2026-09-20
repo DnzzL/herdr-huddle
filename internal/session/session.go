@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/DnzzL/herdr-huddle/internal/herdr"
@@ -26,6 +27,9 @@ type Source struct {
 	// Path is the session JSONL. Empty when no file could be found, in which
 	// case the transcript has to come from the terminal instead.
 	Path string
+	// Kind is the agent kind that wrote the file, and so the adapter that has
+	// to read it. Empty when the agent kind has no adapter at all.
+	Kind string
 	// Partial is true when the only available transcript is a terminal
 	// snapshot: readable prose, but no cursor for incremental sync and no tool
 	// detail. ADR-001 keeps that path as a labelled fallback, never as the
@@ -35,19 +39,35 @@ type Source struct {
 	Reason string
 }
 
-// projectsDir is Claude Code's session root.
-func projectsDir(home string) string { return filepath.Join(home, ".claude", "projects") }
+// transcriptRoot is where an agent kind keeps its sessions. A kind that is not
+// in here has no adapter, which is what makes the terminal the answer for a new
+// agent rather than a guess at its file format.
+func transcriptRoot(home, kind string) (string, bool) {
+	switch kind {
+	case herdr.KindClaude:
+		return filepath.Join(home, ".claude", "projects"), true
+	case herdr.KindPi:
+		return filepath.Join(home, ".pi", "agent", "sessions"), true
+	}
+	return "", false
+}
 
 // Resolve picks the transcript for an agent, in the order ADR-001 sets out:
 // a path reported by the agent, then a session id reported by the agent, then
 // the session file whose own records name the pane's working directory. When
 // none of those hold, the source is the terminal, and it is labelled as partial.
 func Resolve(home string, agent herdr.Agent) (Source, error) {
+	// The kind decides first, because it decides both where to look and what
+	// the file means. An unknown kind is read from the terminal rather than
+	// from a file that a parser would silently render nothing for.
+	if _, ok := transcriptRoot(home, agent.Agent); !ok {
+		return Source{Partial: true, Reason: fmt.Sprintf("no transcript adapter for agent kind %s, so the transcript comes from the terminal", quoteKind(agent.Agent))}, nil
+	}
 	if agent.Session != nil && agent.Session.Value != "" {
 		switch agent.Session.Kind {
 		case herdr.SessionKindPath:
 			if path, err := acceptPath(home, agent.Session.Value); err == nil {
-				return Source{Path: path, Reason: "reported by " + source(agent.Session)}, nil
+				return Source{Path: path, Kind: agent.Agent, Reason: "reported by " + source(agent.Session)}, nil
 			} else {
 				// Falling through is right: the agent told us something we will
 				// not read, and the operator needs to know the file itself was
@@ -55,13 +75,22 @@ func Resolve(home string, agent herdr.Agent) (Source, error) {
 				return resolveByCWD(home, agent, fmt.Sprintf("the reported session path was refused: %v", err))
 			}
 		case herdr.SessionKindID:
-			if path, err := findByID(home, agent.Session.Value); err == nil {
-				return Source{Path: path, Reason: "session id " + agent.Session.Value}, nil
+			if path, err := findByID(home, agent.Agent, agent.Session.Value); err == nil {
+				return Source{Path: path, Kind: agent.Agent, Reason: "session id " + agent.Session.Value}, nil
 			}
 			return resolveByCWD(home, agent, fmt.Sprintf("no file for session id %q", agent.Session.Value))
 		}
 	}
 	return resolveByCWD(home, agent, "")
+}
+
+// quoteKind names an agent kind in a message, including the case where the
+// agent reports none at all.
+func quoteKind(kind string) string {
+	if kind == "" {
+		return "(none reported)"
+	}
+	return strconv.Quote(kind)
 }
 
 // SessionID is the session id of a file, read from its own records. It is what
@@ -71,21 +100,21 @@ func SessionID(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return probe.SessionID, nil
+	return probe.sessionID(), nil
 }
 
 func resolveByCWD(home string, agent herdr.Agent, because string) (Source, error) {
 	if agent.CWD == "" {
-		return Source{Partial: true, Reason: joinReason(because, "the agent reports no working directory")}, nil
+		return Source{Kind: agent.Agent, Partial: true, Reason: joinReason(because, "the agent reports no working directory")}, nil
 	}
-	path, err := newestForCWD(home, agent.CWD)
+	path, err := newestForCWD(home, agent.Agent, agent.CWD)
 	if err != nil {
 		return Source{}, err
 	}
 	if path == "" {
-		return Source{Partial: true, Reason: joinReason(because, "no session file records the working directory "+agent.CWD)}, nil
+		return Source{Kind: agent.Agent, Partial: true, Reason: joinReason(because, "no session file records the working directory "+agent.CWD)}, nil
 	}
-	return Source{Path: path, Reason: "working directory " + agent.CWD}, nil
+	return Source{Path: path, Kind: agent.Agent, Reason: "working directory " + agent.CWD}, nil
 }
 
 func joinReason(because, reason string) string {
@@ -108,11 +137,19 @@ func source(s *herdr.AgentSession) string {
 var sessionIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$`)
 
 // findByID looks for a session file named after the id, in any project.
-func findByID(home, id string) (string, error) {
+//
+// The id is matched anywhere in the filename because the two kinds name their
+// files differently: Claude Code writes <id>.jsonl, pi writes
+// <timestamp>_<id>.jsonl.
+func findByID(home, kind, id string) (string, error) {
 	if !sessionIDRE.MatchString(id) || strings.Contains(id, "..") {
 		return "", fmt.Errorf("%q is not a session id", id)
 	}
-	matches, err := filepath.Glob(filepath.Join(projectsDir(home), "*", id+".jsonl"))
+	root, ok := transcriptRoot(home, kind)
+	if !ok {
+		return "", fmt.Errorf("no transcript adapter for agent kind %q", kind)
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "*", "*"+id+"*.jsonl"))
 	if err != nil {
 		return "", err
 	}
@@ -161,14 +198,18 @@ func underDir(dir, path string) bool {
 // newestForCWD finds the most recently modified session file whose own records
 // name this working directory.
 //
-// Claude Code derives its project directory name from the path by replacing
-// separators, a rule that is undocumented and that differs for paths
-// containing dots. Reading the recorded `cwd` out of the candidate files avoids
-// depending on it. Candidates are examined newest-first and the search stops at
-// the first match, so the cost is one stat per session file on the machine plus
-// a few small reads — not a read of every session.
-func newestForCWD(home, cwd string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(projectsDir(home), "*", "*.jsonl"))
+// Both kinds derive their project directory name from the path by replacing
+// separators, a rule that is undocumented and that differs for paths containing
+// dots. Reading the recorded `cwd` out of the candidate files avoids depending
+// on it. Candidates are examined newest-first and the search stops at the first
+// match, so the cost is one stat per session file on the machine plus a few
+// small reads — not a read of every session.
+func newestForCWD(home, kind, cwd string) (string, error) {
+	root, ok := transcriptRoot(home, kind)
+	if !ok {
+		return "", fmt.Errorf("no transcript adapter for agent kind %q", kind)
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
 	if err != nil {
 		return "", err
 	}
@@ -186,13 +227,25 @@ func newestForCWD(home, cwd string) (string, error) {
 
 // probe is the little of a record that identifies a session.
 type probe struct {
-	CWD       string `json:"cwd"`
+	CWD string `json:"cwd"`
+	// SessionID is Claude Code's key; ID is pi's, on its one cwd-bearing
+	// record. Whichever is present is the session's id.
 	SessionID string `json:"sessionId"`
+	ID        string `json:"id"`
+}
+
+// ID is the session's id, whichever key the agent used for it.
+func (p probe) sessionID() string {
+	if p.SessionID != "" {
+		return p.SessionID
+	}
+	return p.ID
 }
 
 // probeFile reads the first record that names a working directory. The earliest
 // records in a Claude Code session are queue operations with no cwd, so the
-// first line is not enough.
+// first line is not enough; in a pi session the first line is the session
+// record, which carries the cwd.
 func probeFile(path string) (probe, error) {
 	f, err := os.Open(path)
 	if err != nil {
