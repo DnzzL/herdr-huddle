@@ -534,3 +534,67 @@ func TestSeedTranscriptOfAPiSession(t *testing.T) {
 		t.Logf("claude adapter seeded %q (its last id-bearing record); the point is that pi's seed is not empty", got)
 	}
 }
+
+// `serve` is bound to the pane the share was opened from, so the operator does
+// not have to retype a pane id that the record already holds. This is the wiring
+// that bit us once already: a record whose origin never made it in looked
+// perfectly healthy and streamed nothing.
+func TestPaneToServe(t *testing.T) {
+	write := func(t *testing.T, states ...share.State) share.Store {
+		t.Helper()
+		store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+		for _, state := range states {
+			if err := store.Put(state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return store
+	}
+	retired := func(s share.State) share.State {
+		at := time.Now()
+		s.RetiredAt = &at
+		return s
+	}
+
+	live := share.State{Repo: "acme/demo", Branch: "herdr/demo", Origin: share.Origin{Agent: "pi", PaneID: "w16:p1"}}
+	other := share.State{Repo: "acme/other", Branch: "herdr/other", Origin: share.Origin{Agent: "pi", PaneID: "wP:p1"}}
+
+	t.Run("one active share", func(t *testing.T) {
+		pane, err := paneToServe(write(t, retired(share.State{Repo: "acme/old", Branch: "herdr/old", Origin: share.Origin{PaneID: "w1:p1"}}), live))
+		if err != nil {
+			t.Fatalf("paneToServe errored: %v", err)
+		}
+		if pane != "w16:p1" {
+			t.Errorf("pane = %q, want w16:p1", pane)
+		}
+	})
+
+	t.Run("no shares at all", func(t *testing.T) {
+		if _, err := paneToServe(share.Store{Path: filepath.Join(t.TempDir(), "none.json")}); err == nil {
+			t.Error("serving with nothing shared must fail, not stream an empty pane")
+		}
+	})
+
+	t.Run("only retired shares", func(t *testing.T) {
+		if _, err := paneToServe(write(t, retired(live))); err == nil {
+			t.Error("a retired share must not be served: its agent is gone")
+		}
+	})
+
+	t.Run("several active shares", func(t *testing.T) {
+		_, err := paneToServe(write(t, live, other))
+		if err == nil {
+			t.Fatal("with two active shares the pane is ambiguous, so it must fail")
+		}
+		if !strings.Contains(err.Error(), "--pane") {
+			t.Errorf("error = %v, want it to name the --pane escape hatch", err)
+		}
+	})
+
+	t.Run("an active share with no pane", func(t *testing.T) {
+		_, err := paneToServe(write(t, share.State{Repo: "acme/demo", Branch: "herdr/demo"}))
+		if err == nil {
+			t.Error("a share opened outside a pane has nothing to stream")
+		}
+	})
+}

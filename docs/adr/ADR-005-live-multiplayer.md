@@ -43,8 +43,31 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
 
 ## Known gaps
 
-- None of the above is built yet: there is no stream, no join client, no door, no live injection path. The next phase must start from phase 1 (the daemon-side stream), which can be verified alone: frames delivered to a local `herdr-huddle join` on the same machine before any tunnel/policy exists.
-- Off-machine transport is untested in every variant (Tailscale, Cloudflare Access, locked SSH); the ADR names a preference, not a measurement.
-- The exact shape of a live comment's GitHub record (reply-to-turn vs reply-to-message, attribution line) is unverified against real API behaviour and must be defined before phase 1 is used for real.
-- Herdr's `observe` survives pane resize, scroll and agent restarts in ways we have not yet watched (multi-observer is documented, not yet exercised by us beyond a 5-second peek).
-- The daemon lives longer than a poller pass now — lifecycle, reconnect and the "no active share" rule all need re-examination against the new obligations.
+- **Phase 1 (the daemon-side stream) is built and verified locally**: `serve`
+  runs `herdr terminal session observe` per joiner and pipes the frames
+  unchanged; `join` draws them. Verified on 0.9.0 against a live pane on this
+  machine — a real screen drawn in another process over TCP through
+  (`127.0.0.1:8787`), two joiners at once, a pane that does not exist reported
+  as `terminal target w99:p99 not found`, and no `observe` child left behind
+  when a joiner leaves.
+- **The stream has no identity check at all.** It is loopback-only for that
+  reason: reaching the port is the whole of the gate, and the allowlist (which
+  does not yet apply here) is not consulted. The door and the collaborator's
+  device-flow proof are phases 2 and 3, and the port must not be reachable from
+  off the machine before they land.
+- **Nothing manages the serve process.** It is a foreground command with no
+  lock, no idle rule and no supervision by the plugin, and it survives nothing:
+  no reconnect after a network blip, no restart of a dead pane's stream beyond
+  the joiner being told and reconnecting. Its relation to the startup hook and to
+  ADR-003's "no active share" fast path is undecided.
+- **The agent-status summary is not built.** ADR-005's phase 1 names it (`herdr api snapshot`) alongside the frame stream, as the thing that tells a joiner *what* the agent is doing rather than only what it is printing. Phase 1 ships the frames alone; a joiner sees the pane, not whether the agent is working, blocked or idle.
+- **No comment box.** The client is output-only as built; the live-injection
+  path (allowlist → `agent prompt` → GitHub record) is phase 4, and the shape of
+  that comment's record (reply-to-turn vs reply-to-message, attribution line) is
+  still unverified against the real API.
+- **The viewport is the server's, not the joiner's.** Each stream is rendered at
+  one fixed size chosen at startup; a joiner's real window size is not sent, so
+  a narrow terminal wraps. Resize, scrollback and an agent restart mid-stream
+  have not been watched beyond minutes.
+- **Off-machine transport is untested in every variant** (Tailscale, Cloudflare
+  Access, locked SSH); the ADR names a preference, not a measurement.

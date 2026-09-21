@@ -67,10 +67,11 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
 
 ## What the two of you see
 
-- **Your collaborator installs nothing.** No Herdr, no herdr-huddle, no token:
-  the thread is a normal pull request, and the URL is the whole invitation. On a
-  private repository they still need read access to comment at all — see the
-  limits below.
+- **Your collaborator installs nothing to follow the thread.** No Herdr, no
+  herdr-huddle, no token: the thread is a normal pull request, and the URL is
+  the whole invitation. On a private repository they still need read access to
+  comment at all — see the limits below. Watching the agent *live* is the one
+  thing that does need a client; that is `herdr-huddle join`.
 - **The pull request body** is a header, written once when the share opens. It
   says what the thread is and what the `/agent` rules are.
 - **The transcript** arrives as comments, one per completed agent turn, each
@@ -85,6 +86,35 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
   log and nowhere public. Silence means "check with whoever runs the poller".
 - **The diff is empty** until *you* commit. Uncommitted work is deliberately not
   mirrored: a diff that changes under a reviewer without a commit is a lie.
+
+- **The diff is empty** until *you* commit. Uncommitted work is deliberately not
+  mirrored: a diff that changes under a reviewer without a commit is a lie.
+
+### Join the agent live
+
+`herdr-huddle serve` streams the pane you shared; `herdr-huddle join` draws that
+stream in someone else's terminal. It is the difference between reading what the
+agent already said and watching it say it.
+
+```
+# on your machine, in the pane's project
+./bin/herdr-huddle serve          # defaults to the pane the active share is bound to
+
+# on the other machine
+herdr-huddle join --addr <your-host>:8787
+```
+
+- **Each joiner gets their own read-only stream** of the pane, freshly painted
+  from the top, so someone arriving late sees a whole screen rather than the tail
+  of one. Several people can join at once.
+- **Nothing is written to the pane and nothing is read back from the joiner.**
+  The stream is one direction only: the terminal is the agent's, and the way to
+  steer it is still a comment on the thread.
+- **Leaving is Ctrl-C.** Closing the tab or killing the client ends your stream
+  and the observer behind it, and changes nothing else.
+
+If the pane is gone, the joiner is told why (`terminal target w16:p1 not found`)
+rather than left with a blank screen.
 
 ## The limits worth knowing before you rely on it
 
@@ -103,6 +133,22 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
 - **`/agent` text is untrusted input.** The prompt that carries it says so, and
   carries the author's login. That is a defence, not a sandbox: an agent that
   obeys a comment can still do anything you could do.
+- **The live stream is unauthenticated and binds to loopback.** Anyone who can
+  reach the address sees the pane's screen, so `serve` listens on `127.0.0.1`
+  only. Do not put it on a public interface or behind a port-forward as it
+  stands: the door (Tailscale, or Cloudflare Access, or an SSH forced command)
+  and the identity check on top of it are the next phase, and until they exist
+  the port is the whole of the gate. The allowlist does not apply to the stream
+  yet.
+- **The live view is one-way.** The joiner's client cannot type, upvote or
+  interrupt yet; steering still goes through `/agent` comments. The stream is
+  read-only *by construction*: it runs `herdr terminal session observe`, which
+  takes no input, no resize and no takeover, so there is no code path here that
+  could write to the pane even if a client sent bytes.
+- **The stream is rendered at the size the server chose** (`--cols`, `--rows`,
+  default 100×30), not at the joiner's window size. A narrow terminal will wrap.
+- **Nothing starts the stream for you.** `serve` is a foreground command you run
+  and stop; the plugin's startup hook still starts only the poller.
 - **The transcript comes from the agent's own session file**, read by an
   adapter for that agent kind (`pi` or Claude Code). Herdr does not report a
   session for every kind, and there is no adapter for the ones it does not. When
@@ -123,7 +169,14 @@ herdr-huddle auth status
 herdr-huddle auth logout
 herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
 herdr-huddle poll [--once] [--interval 10s]
+herdr-huddle serve [--pane id] [--addr 127.0.0.1:8787] [--cols n] [--rows n]
+herdr-huddle join [--addr 127.0.0.1:8787]
 ```
+
+`serve` streams one pane to whoever joins it. It streams the pane the single
+active share is bound to; pass `--pane` when more than one share is active, or
+when there is no share at all. `join` draws that stream in the current terminal
+until it ends.
 
 `share --dry-run` reports what would happen and changes nothing — no token
 needed, no branch, no push, no pull request. `poll --once` makes a single pass and

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/DnzzL/herdr-huddle/internal/auth"
 	"github.com/DnzzL/herdr-huddle/internal/github"
 	"github.com/DnzzL/herdr-huddle/internal/herdr"
+	"github.com/DnzzL/herdr-huddle/internal/live"
 	"github.com/DnzzL/herdr-huddle/internal/poll"
 	"github.com/DnzzL/herdr-huddle/internal/repo"
 	"github.com/DnzzL/herdr-huddle/internal/session"
@@ -54,6 +56,19 @@ func main() {
 	os.Exit(1)
 }
 
+// shareStore is the one place that knows where the share records live. Three
+// commands read them; a second spelling of this path would let `serve` stream a
+// different file from the one `poll` writes.
+func shareStore() share.Store {
+	return share.Store{Path: filepath.Join(configDir(), "shares.json")}
+}
+
+// defaultLiveAddr is where the live stream is served. Loopback, because the
+// only thing that should reach it today is a joiner on this machine or a tunnel
+// the operator put there deliberately (ADR-005). A port that will not open is
+// also what stops a second server starting by accident.
+const defaultLiveAddr = "127.0.0.1:8787"
+
 func run(args []string) error {
 	if len(args) == 0 {
 		usage()
@@ -66,6 +81,10 @@ func run(args []string) error {
 		return runShare(args[1:])
 	case "poll":
 		return runPoll(args[1:])
+	case "serve":
+		return runServe(args[1:])
+	case "join":
+		return runJoin(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -84,6 +103,8 @@ Usage:
   herdr-huddle auth logout
   herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
   herdr-huddle poll [--once] [--interval 10s]
+  herdr-huddle serve [--pane id] [--addr 127.0.0.1:8787] [--cols n] [--rows n]
+  herdr-huddle join [--addr 127.0.0.1:8787]
 
 Auth:
   login    Authorize with GitHub via the device flow and store the token.
@@ -111,6 +132,24 @@ Poll:
            and locked so that two copies never deliver an instruction twice.
            --once      make one pass and exit, reporting what it did.
            --interval  how often to look, default 10s.
+
+Serve and join:
+  serve    Stream one agent pane to whoever joins. The pane defaults to the one
+           the single active share is bound to; --pane overrides it, and is
+           required when more than one share is active. Each joiner gets its
+           own read-only terminal stream, so a joiner that arrives late still
+           receives a complete screen. Nothing is written to the pane and
+           nothing is read from the joiner: steering happens through the
+           thread's comments (ADR-005).
+           --addr  where to listen; loopback by default, so a tunnel is a
+                   deliberate act rather than an accident.
+           --cols, --rows  the viewport the stream is rendered at.
+  join     Join a live share: draw the stream in this terminal until it ends.
+           --addr  the server to join.
+
+A share is the whole of it for now: share opens the thread, serve streams its
+agent live, and join is the other person's window into it. The writes to GitHub
+are still made by poll.
 `)
 }
 
@@ -174,7 +213,7 @@ func runShare(args []string) error {
 		fmt.Fprintf(os.Stdout, "warning   %s\n", warning)
 	}
 
-	store := share.Store{Path: filepath.Join(configDir(), "shares.json")}
+	store := shareStore()
 	state, resumed, err := recordShare(store, result, origin, time.Now())
 	if err != nil {
 		return fmt.Errorf("the pull request is open, but recording it for the poller failed: %w", err)
@@ -297,7 +336,7 @@ func runPoll(args []string) error {
 	}
 
 	intervalValue := effectiveInterval(*interval)
-	shares := share.Store{Path: filepath.Join(configDir(), "shares.json")}
+	shares := shareStore()
 	poller := &poll.Poller{
 		Shares: shares,
 		Herdr:  &herdr.Client{},
@@ -380,6 +419,119 @@ func effectiveInterval(flagValue time.Duration) time.Duration {
 		return flagValue
 	}
 	return poll.DefaultInterval
+}
+
+// runServe streams the pane a share is bound to. ADR-005 splits a share in two:
+// the ledger is GitHub and the transport is this. The pane is resolved from the
+// record rather than typed, because the record is where it was deliberately
+// captured at share time.
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	addr := fs.String("addr", defaultLiveAddr, "where to listen for joiners")
+	pane := fs.String("pane", "", "the pane to stream (default: the pane the active share is bound to)")
+	cols := fs.Int("cols", live.DefaultCols, "the width the stream is rendered at")
+	rows := fs.Int("rows", live.DefaultRows, "the height the stream is rendered at")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("%w: `serve` takes no positional arguments, got %q", errUsage, fs.Arg(0))
+	}
+
+	target := *pane
+	if target == "" {
+		resolved, err := paneToServe(shareStore())
+		if err != nil {
+			return err
+		}
+		target = resolved
+	}
+
+	ctx, stop := withSignals()
+	defer stop()
+
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return fmt.Errorf("could not listen on %s: %w", *addr, err)
+	}
+
+	server := &live.Server{
+		Pane:    target,
+		Cols:    *cols,
+		Rows:    *rows,
+		Observe: &live.HerdrObserver{},
+		Log: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
+		},
+	}
+	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s at %s (%dx%d)\n", target, ln.Addr(), *cols, *rows)
+	return server.Serve(ctx, ln)
+}
+
+// paneToServe finds the pane the live stream should carry. It refuses to guess:
+// a share with no pane has nothing to stream, and two active shares make the
+// answer ambiguous. Both are the operator's decision to make, so both say how
+// to make it.
+func paneToServe(store share.Store) (string, error) {
+	states, err := store.Load()
+	if err != nil {
+		return "", err
+	}
+
+	var panes []string
+	for _, state := range states {
+		if state.Active() && state.Origin.PaneID != "" {
+			panes = append(panes, state.Origin.PaneID)
+		}
+	}
+	switch len(panes) {
+	case 0:
+		return "", errors.New("no active share is bound to a pane, so there is nothing to stream: run `share` from the agent's pane, or pass --pane")
+	case 1:
+		return panes[0], nil
+	default:
+		return "", fmt.Errorf("more than one active share is bound to a pane (%s), so which to stream is ambiguous: pass --pane", strings.Join(panes, ", "))
+	}
+}
+
+// runJoin draws a live stream in this terminal. Phase 1 is one-way by design:
+// the joiner receives frames and sends nothing, and the way to steer is a
+// comment on the thread (ADR-005).
+func runJoin(args []string) error {
+	fs := flag.NewFlagSet("join", flag.ContinueOnError)
+	addr := fs.String("addr", defaultLiveAddr, "the server to join")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("%w: `join` takes no positional arguments, got %q", errUsage, fs.Arg(0))
+	}
+
+	ctx, stop := withSignals()
+	defer stop()
+
+	conn, err := net.Dial("tcp", *addr)
+	if err != nil {
+		return fmt.Errorf("could not reach a live share at %s: %w", *addr, err)
+	}
+	defer conn.Close()
+
+	// A Ctrl-C closes the connection, which is what tells the server to end this
+	// joiner's stream — and, with it, the observe child behind it.
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
+
+	fmt.Fprintf(os.Stderr, "herdr-huddle: joined the live share at %s (Ctrl-C to leave)\n", *addr)
+	err = live.Render(conn, os.Stdout)
+	if ctx.Err() != nil {
+		// The operator left. Closing the connection is how this end leaves and
+		// what tells the server to end the stream, so the error that follows
+		// from it is the leaving, not a failure to report.
+		return nil
+	}
+	return err
 }
 
 // printPollResult reports one pass in the order the work happened.
