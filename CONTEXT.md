@@ -25,7 +25,7 @@ The set of logins whose comments may be delivered into the agent. The real secur
 _Avoid_: peer, teammate (they imply a separate environment, which is out of scope)
 
 **Stream**:
-The one-way flow of the agent's ANSI frames, from the pane to the viewers. Read-only by construction; the collaborator sends nothing into it.
+The one-way flow of the agent's ANSI frames, from the pane to the joiners. Read-only by construction; the collaborator sends nothing into it.
 
 **Viewer**:
 The role of the client a collaborator runs to join a live share — it renders the stream and sends instructions. Its proof of identity is the collaborator's GitHub token. The command name is `join`, not `watch`: the client has a voice.
