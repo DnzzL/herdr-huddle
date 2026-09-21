@@ -28,7 +28,9 @@ _Avoid_: peer, teammate (they imply a separate environment, which is out of scop
 The one-way flow of the agent's ANSI frames, from the pane to the viewers. Read-only by construction; the collaborator sends nothing into it.
 
 **Viewer**:
-The client a collaborator runs to watch the stream and send instructions. Its proof of identity is the collaborator's GitHub token.
+The role of the client a collaborator runs to join a live share — it renders the stream and sends instructions. Its proof of identity is the collaborator's GitHub token. The command name is `join`, not `watch`: the client has a voice.
+
+_Avoid_: watch (a read-only word for a client that can steer)
 
 **Ledger**:
 GitHub. The canonical, append-only record of every turn and every steering comment. The transport must never wait for it; it must eventually hold everything.
