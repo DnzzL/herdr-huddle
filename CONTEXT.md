@@ -1,0 +1,36 @@
+# Herdr Huddle
+
+A shared thread that lets a second person watch and steer one coding agent that runs in an agent session on the operator's machine, with GitHub keeping the record.
+
+## Language
+
+**Share**:
+The act and record of making one agent's session followable: a branch, a pull request, and a bound origin on the operator's machine. A thread is dead once its share is retired.
+
+**Thread**:
+The pull request: its body is a static header, and its comments are the recording of the conversation.
+
+**Turn**:
+Everything one agent did between two moments of rest. The unit that gets posted, and the anchor a comment can attach to.
+
+**Operator**:
+The person whose machine and agent session a share is bound to. Runs the poller; owns the permission gate.
+
+**Collaborator**:
+A person an operator invites to a share. Joins the operator's machine-bound world and runs nothing of their own — no agent, no checkout, no Herdr. Explicitly not a peer who brings their own environment.
+
+**Allowlist**:
+The set of logins whose comments may be delivered into the agent. The real security boundary of the thread.
+
+_Avoid_: peer, teammate (they imply a separate environment, which is out of scope)
+
+**Stream**:
+The one-way flow of the agent's ANSI frames, from the pane to the viewers. Read-only by construction; the collaborator sends nothing into it.
+
+**Viewer**:
+The client a collaborator runs to watch the stream and send instructions. Its proof of identity is the collaborator's GitHub token.
+
+**Ledger**:
+GitHub. The canonical, append-only record of every turn and every steering comment. The transport must never wait for it; it must eventually hold everything.
+
+_Avoid_: live view (the act of watching, not an entity), feed, relay
