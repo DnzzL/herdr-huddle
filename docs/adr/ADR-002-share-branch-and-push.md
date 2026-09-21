@@ -47,12 +47,17 @@ these are worth pinning before the code exists.
 - **It pushes**, and says what it is about to do first: repo, branch, base. The
   push is what makes the PR possible, so making it a separate manual step is a
   worse version of the same thing. `--dry-run` stops after printing.
-- `--invite @user` issues the `PUT .../collaborators/{user}` from ADR-001 once
-  the PR exists, and reports the failure rather than hiding it when the operator
-  lacks admin rights. The allowlist of comments that may drive the agent is the
-  operator's own login first, then each successful invitation: without the
-  operator on it, the person who owns the agent could not steer it from the PR,
-  which is the loop the whole thing exists for.
+- `--invite @user` makes sure the person can read the repository: it issues the
+  `PUT .../collaborators/{user}` from ADR-001 once the PR exists, and when that
+  fails it asks `GET .../collaborators/{user}` before believing the failure. An
+  invite that GitHub refuses because the person already has access is not a
+  failure to give them access — measured, a `write` collaborator gets 422
+  Validation Failed where the documentation implies 204 — and they still have to
+  reach the allowlist, or their `/agent` comments are ignored on a PR they can
+  read. The allowlist of comments that may drive the agent is the operator's own
+  login first, then every login that could be invited or already had access:
+  without the operator on it, the person who owns the agent could not steer it
+  from the PR, which is the loop the whole thing exists for.
 
 ## Consequences
 
@@ -74,9 +79,13 @@ these are worth pinning before the code exists.
 
 ## Known gaps
 
-- not tested: no push and no pull request has ever run against GitHub. The
-  branch, empty commit, base selection, idempotency and push are exercised
-  against a local bare repository, and the API against a fake server.
+- not covered by a test: the branch, empty commit, base selection, idempotency
+  and push are exercised against a local bare repository, and the API against a
+  fake server. They have run against GitHub exactly once, by hand: `share`
+  pushed `herdr/molkky` and opened draft PR #13 on DnzzL/molkky, and a second run
+  reused both. Nothing detects a regression in that path.
+- not verified: the invitation path. Measured once against a login that already
+  had access (422), never for a login that had none.
 - not done: `share` records the share and opens the thread, but the transcript
   arrives only once the poller runs — see ADR-003 for why the body stays a
   header and what that means for a fresh share.

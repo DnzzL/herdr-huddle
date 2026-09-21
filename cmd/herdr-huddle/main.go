@@ -175,7 +175,7 @@ func runShare(args []string) error {
 	}
 
 	store := share.Store{Path: filepath.Join(configDir(), "shares.json")}
-	state, resumed, err := store.Record(share.FromResult(result, time.Now()), seedTranscript(origin.Kind, origin.Session))
+	state, resumed, err := recordShare(store, result, origin, time.Now())
 	if err != nil {
 		return fmt.Errorf("the pull request is open, but recording it for the poller failed: %w", err)
 	}
@@ -239,6 +239,18 @@ func localOrigin(ctx context.Context) (share.Origin, []string) {
 		return origin, nil
 	}
 	return origin, []string{"no session file was found for this pane: " + src.Reason}
+}
+
+// recordShare stores a share for the poller, bound to the origin it was opened
+// from.
+//
+// This is a function of its own because the wiring here, not the parts, is what
+// breaks: a record written without its origin looks exactly like a share opened
+// outside a pane. The poller then retires it on its first pass, and a thread that
+// looks perfectly healthy never receives a single turn. That happened, and the
+// parts all had tests.
+func recordShare(store share.Store, result share.Result, origin share.Origin, now time.Time) (share.State, bool, error) {
+	return store.Record(share.FromResult(result, origin, now), seedTranscript(origin.Kind, origin.Session))
 }
 
 // seedTranscript is where a brand new share's transcript cursor starts: the end

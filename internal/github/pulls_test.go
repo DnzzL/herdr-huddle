@@ -123,8 +123,9 @@ func TestFindOpenPullRequest_ReportsAmbiguity(t *testing.T) {
 }
 
 // The invite is once per share, and a second attempt must not be reported as a
-// failure: GitHub answers 201 for a new invitation and 204 when the user is
-// already a collaborator.
+// failure... except that GitHub does report it as one: measured, inviting a
+// `write` collaborator answers 422 Validation Failed rather than the 204 the
+// documentation implies. The 201/204 cases below are still the happy paths.
 func TestAddCollaborator(t *testing.T) {
 	for _, status := range []int{201, 204} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -180,6 +181,62 @@ func TestAddCollaborator_RejectsNonLogin(t *testing.T) {
 		if err := c.AddCollaborator(context.Background(), "acme", "demo", bad); err == nil {
 			t.Errorf("AddCollaborator(%q) succeeded, want an error", bad)
 		}
+	}
+}
+
+// Whether someone can already read the repository is answered by the status code
+// alone, and that answer decides whether a failed invitation is a failure.
+func TestHasAccess(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		want   bool
+	}{
+		// 204: a collaborator, whatever their role.
+		{http.StatusNoContent, true},
+		// 404: not a collaborator. GitHub answers 404 rather than 403 so that it
+		// does not disclose who has access to a private repository.
+		{http.StatusNotFound, false},
+	} {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			var gotPath string
+			c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(tt.status)
+			})
+			got, err := c.HasAccess(context.Background(), "acme", "demo", "pagbrl")
+			if err != nil {
+				t.Fatalf("HasAccess: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("HasAccess = %v, want %v", got, tt.want)
+			}
+			if gotPath != "/repos/acme/demo/collaborators/pagbrl" {
+				t.Errorf("path = %q", gotPath)
+			}
+		})
+	}
+}
+
+// A status that is neither 204 nor 404 is a real failure, and must not be read as
+// "they have no access": treating an outage as a no would drop a collaborator off
+// the allowlist and silently stop their comments reaching the agent.
+func TestHasAccess_ReportsARealFailure(t *testing.T) {
+	c, _ := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(403)
+		_, _ = w.Write([]byte(`{"message":"Forbidden"}`))
+	})
+	if _, err := c.HasAccess(context.Background(), "acme", "demo", "bob"); err == nil {
+		t.Error("want an error, not a silent no-access")
+	}
+}
+
+// The login becomes a URL path segment here too.
+func TestHasAccess_RejectsNonLogin(t *testing.T) {
+	c, _ := testClient(t, func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("a request was made for a malformed login: %s", r.URL.Path)
+	})
+	if _, err := c.HasAccess(context.Background(), "acme", "demo", "bob/../admin"); err == nil {
+		t.Error("want an error for a path that escapes the endpoint")
 	}
 }
 

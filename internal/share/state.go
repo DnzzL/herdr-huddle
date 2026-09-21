@@ -103,7 +103,13 @@ func (s State) Owner() (string, string) {
 func (s State) Key() string { return s.Repo + "#" + s.Branch }
 
 // FromResult builds the record for a share that was just opened.
-func FromResult(res Result, now time.Time) State {
+//
+// The origin is a parameter rather than something the caller assigns afterwards.
+// A record that reaches disk without it is indistinguishable from a share opened
+// outside a pane: the poller retires it on its first pass, and the thread never
+// receives a transcript. Making it required is the difference between that being
+// impossible and being easy to forget.
+func FromResult(res Result, origin Origin, now time.Time) State {
 	return State{
 		Repo:      res.Repo.String(),
 		Branch:    res.Branch,
@@ -111,6 +117,7 @@ func FromResult(res Result, now time.Time) State {
 		Number:    res.PullRequest.Number,
 		URL:       res.PullRequest.HTMLURL,
 		Allowlist: append([]string(nil), res.Allowlist...),
+		Origin:    origin,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

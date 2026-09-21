@@ -101,6 +101,8 @@ type fakeForge struct {
 	existing      []github.PullRequest
 	createErr     error
 	collabErr     error
+	hasAccess     bool
+	accessErr     error
 	creates       []github.CreatePullRequestRequest
 	collabs       []string
 	findCalls     int
@@ -141,6 +143,13 @@ func (f *fakeForge) AddCollaborator(_ context.Context, _, _, login string) error
 	}
 	f.collabs = append(f.collabs, login)
 	return nil
+}
+
+func (f *fakeForge) HasAccess(_ context.Context, _, _, _ string) (bool, error) {
+	if f.accessErr != nil {
+		return false, f.accessErr
+	}
+	return f.hasAccess, nil
 }
 
 func TestDeriveSlug(t *testing.T) {
@@ -522,6 +531,61 @@ func TestOpen_InvitesAndKeepsTheShareWhenAnInviteFails(t *testing.T) {
 	}
 }
 
+// A failed invitation means "you could not be given access", not "you have no
+// access": pagbrl already had write access to the repository this was measured
+// on, and GitHub answers 422 for that rather than the 204 its documentation
+// implies. Treating it as a failure left the collaborator off the allowlist,
+// which is the one thing that lets their /agent comments reach the agent.
+func TestOpen_InvitesSomeoneWhoAlreadyHasAccess(t *testing.T) {
+	git, forge := newFakeGit(), &fakeForge{
+		viewer:    "operator",
+		collabErr: errors.New("github: 422: Validation Failed"),
+		hasAccess: true,
+	}
+	res, err := Open(context.Background(), git, forge, Request{Invite: []string{"@pagbrl"}})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !contains(res.Allowlist, "pagbrl") {
+		t.Errorf("Allowlist = %v, want pagbrl on it", res.Allowlist)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none: the person can already read the repository", res.Warnings)
+	}
+	if contains(res.Invited, "pagbrl") {
+		t.Error("Invited claims an invitation was sent; nobody was invited, they already had access")
+	}
+}
+
+// Someone who can genuinely not be given access is reported, and is not
+// allowlisted: the warning is the operator's only signal that the person they
+// meant to share with cannot comment.
+func TestOpen_WarnsWhenTheInviteFailsAndTheyHaveNoAccess(t *testing.T) {
+	git, forge := newFakeGit(), &fakeForge{
+		viewer:    "operator",
+		collabErr: errors.New("github: 422: Validation Failed"),
+	}
+	res, err := Open(context.Background(), git, forge, Request{Invite: []string{"typoo"}})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if contains(res.Allowlist, "typoo") {
+		t.Errorf("Allowlist = %v, want nobody who has no access", res.Allowlist)
+	}
+	if !hasWarning(res.Warnings, "could not invite typoo") {
+		t.Errorf("Warnings = %v, want the failure reported", res.Warnings)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // A push failure has to stop the share: opening a pull request against a branch
 // GitHub cannot see would fail anyway, with a worse message.
 func TestOpen_PushFailureStopsBeforeCreatingThePullRequest(t *testing.T) {
@@ -580,9 +644,12 @@ func TestOpen_AllowlistContainsOperatorAndInvitees(t *testing.T) {
 	if len(res.Allowlist) != 2 || res.Allowlist[0] != "operator" || res.Allowlist[1] != "bob" {
 		t.Errorf("Allowlist = %v, want [operator bob]", res.Allowlist)
 	}
-	st := FromResult(res, time.Now())
+	st := FromResult(res, Origin{PaneID: "wQ:p1", Agent: "pi", CWD: "/tmp/x", Kind: "pi", Session: "/tmp/x/s.jsonl"}, time.Now())
 	if len(st.Allowlist) != 2 {
 		t.Errorf("recorded allowlist = %v, want the same two logins", st.Allowlist)
+	}
+	if st.Origin.PaneID != "wQ:p1" {
+		t.Errorf("recorded origin = %+v, want the pane the share was opened from", st.Origin)
 	}
 }
 
@@ -635,12 +702,19 @@ func TestFromResult_RecordsTheShareThePollerNeeds(t *testing.T) {
 		Allowlist:   []string{"operator", "bob"},
 	}
 	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-	st := FromResult(res, now)
+	origin := Origin{PaneID: "wQ:p1", Agent: "pi", CWD: "/tmp/x", Kind: "pi", Session: "/tmp/x/s.jsonl", SessionID: "abc"}
+	st := FromResult(res, origin, now)
 	if st.Key() != "acme/demo#herdr/improve-pane" {
 		t.Errorf("Key = %q", st.Key())
 	}
 	if st.Number != 42 || st.URL == "" || st.Base != "main" {
 		t.Errorf("record = %+v", st)
+	}
+	// Without this the poller sees a share with no agent, retires it, and the
+	// thread never receives a transcript — the failure that reaching this level
+	// of the code with no origin causes.
+	if st.Origin != origin {
+		t.Errorf("Origin = %+v, want %+v", st.Origin, origin)
 	}
 	if !st.CreatedAt.Equal(now) || !st.UpdatedAt.Equal(now) {
 		t.Errorf("timestamps = %v/%v", st.CreatedAt, st.UpdatedAt)
@@ -684,6 +758,14 @@ func TestOpen_WordingExplainsTheThread(t *testing.T) {
 	}
 	if !strings.Contains(created.Body, "diff") {
 		t.Errorf("body = %q, want it to say where the work goes", created.Body)
+	}
+	// ADR-003 moves the conversation to the comments, so a body that promises it
+	// is in the body sends the reader looking in the wrong place.
+	if strings.Contains(created.Body, "in this body") {
+		t.Errorf("body = %q, claims the conversation lands in the body", created.Body)
+	}
+	if !strings.Contains(created.Body, "comments") {
+		t.Errorf("body = %q, want it to say the conversation arrives as comments", created.Body)
 	}
 }
 

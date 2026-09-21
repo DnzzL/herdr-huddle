@@ -101,9 +101,11 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
   no file can be found, this falls back to
   reading the pane's terminal and labels the comment as a partial transcript —
   readable, but with no cursor for incremental sync and collapsed tool calls.
-- **No comment has ever been posted to a real GitHub pull request by a test.**
-  The API is exercised against a fake server and the git side against a local
-  bare repository. See `## Known gaps` in ADR-002 and ADR-004.
+- **No transcript comment has been posted to a real pull request yet.** The API
+  is exercised against a fake server and the git side against a local bare
+  repository; the only real share so far pushed its branch and opened its draft
+  pull request, and then stopped there. See `## Known gaps` in ADR-002, ADR-003
+  and ADR-004.
 
 ## Commands
 

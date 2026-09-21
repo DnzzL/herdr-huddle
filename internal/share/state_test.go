@@ -230,7 +230,7 @@ func TestRecord_NewShareStartsAtTheEndOfTheSession(t *testing.T) {
 	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
 	now := time.Now()
 
-	fresh := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	fresh := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now)
 	got, resumed, err := store.Record(fresh, "uuid-at-the-end")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
@@ -252,7 +252,7 @@ func TestRecord_ReSharingKeepsTheCursors(t *testing.T) {
 	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
 	now := time.Now()
 
-	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now)
 	base.Origin = Origin{PaneID: "wQ:p1", Session: "/home/t/.claude/projects/-x/s.jsonl", Agent: "claude"}
 	base.Cursors = Cursors{Transcript: "t9", Comment: 42, Snapshot: "abc", ETag: `W/"1"`, Blocked: true}
 	if _, _, err := store.Record(base, "seed"); err != nil {
@@ -267,7 +267,7 @@ func TestRecord_ReSharingKeepsTheCursors(t *testing.T) {
 	}
 
 	// The operator re-runs `share` to pick the thread back up.
-	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now.Add(time.Hour))
+	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now.Add(time.Hour))
 	again.Origin = base.Origin
 	got, resumed, err := store.Record(again, "a-brand-new-seed")
 	if err != nil {
@@ -295,7 +295,7 @@ func TestRecord_ANewSessionKeepsTheInstructionCursor(t *testing.T) {
 	store := Store{Path: filepath.Join(t.TempDir(), "shares.json")}
 	now := time.Now()
 
-	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now)
 	base.Origin = Origin{PaneID: "wQ:p1", Session: "/home/t/.claude/projects/-x/old.jsonl"}
 	base.Cursors = Cursors{Transcript: "old-9", Comment: 42, Snapshot: "abc", ETag: `W/"1"`}
 	if _, _, err := store.Record(base, "seed"); err != nil {
@@ -303,7 +303,7 @@ func TestRecord_ANewSessionKeepsTheInstructionCursor(t *testing.T) {
 	}
 
 	// The agent restarted, so the same share now points at a new session.
-	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now.Add(time.Hour))
+	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now.Add(time.Hour))
 	again.Origin = Origin{PaneID: "wQ:p1", Session: "/home/t/.claude/projects/-x/new.jsonl"}
 	got, _, err := store.Record(again, "new-seed")
 	if err != nil {
@@ -336,13 +336,13 @@ func TestRecord_RevivesARetiredShare(t *testing.T) {
 	now := time.Now()
 	retired := now.Add(-time.Hour)
 
-	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	base := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now)
 	base.RetiredAt = &retired
 	if err := store.Put(base); err != nil {
 		t.Fatal(err)
 	}
 
-	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, now)
+	again := FromResult(Result{Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/x"}, Origin{}, now)
 	got, _, err := store.Record(again, "seed")
 	if err != nil {
 		t.Fatalf("Record: %v", err)

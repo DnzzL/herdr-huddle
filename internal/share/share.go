@@ -39,6 +39,7 @@ type Forge interface {
 	FindOpenPullRequests(ctx context.Context, owner, repo, headOwner, branch string) ([]github.PullRequest, error)
 	CreatePullRequest(ctx context.Context, owner, repo string, req github.CreatePullRequestRequest) (github.PullRequest, error)
 	AddCollaborator(ctx context.Context, owner, repo, login string) error
+	HasAccess(ctx context.Context, owner, repo, login string) (bool, error)
 }
 
 // Request is what the caller asks for. Every field is optional except the
@@ -237,10 +238,24 @@ func Open(ctx context.Context, git Git, forge Forge, req Request) (Result, error
 			continue
 		}
 		if err := forge.AddCollaborator(ctx, slug.Owner, slug.Name, login); err != nil {
-			// The thread exists at this point, so a failed invitation is
-			// reported and the share is kept: an operator who lacks admin on a
-			// work org (ADR-001) must still get their pull request.
-			res.Warnings = append(res.Warnings, fmt.Sprintf("could not invite %s: %v", login, err))
+			// An invite asks for access, and GitHub refuses one for somebody who
+			// already has it (measured: 422 for a `write` collaborator). That is
+			// not a failure to give them access, and it must not keep them off the
+			// allowlist: the allowlist is what lets their /agent comments drive
+			// the agent, on a thread they can already read.
+			already, checkErr := forge.HasAccess(ctx, slug.Owner, slug.Name, login)
+			switch {
+			case checkErr == nil && already:
+				res.Allowlist = append(res.Allowlist, login)
+			case checkErr != nil:
+				res.Warnings = append(res.Warnings, fmt.Sprintf(
+					"could not invite %s: %v; could not check whether they already have access: %v", login, err, checkErr))
+			default:
+				// The thread exists at this point, so a failed invitation is
+				// reported and the share is kept: an operator who lacks admin on a
+				// work org (ADR-001) must still get their pull request.
+				res.Warnings = append(res.Warnings, fmt.Sprintf("could not invite %s: %v", login, err))
+			}
 			continue
 		}
 		res.Invited = append(res.Invited, login)
@@ -293,7 +308,7 @@ func commitMessage(slug string) string {
 	// sees in the log, and an empty commit with no explanation reads as a mistake.
 	return "herdr-huddle: open a shared thread for " + slug + "\n\n" +
 		"This commit is empty on purpose. The pull request is the thread:\n" +
-		"the conversation goes in its body and the work goes on this branch."
+		"the conversation goes in its comments and the work goes on this branch."
 }
 
 // title is the pull request title.
@@ -304,15 +319,17 @@ func title(override, slug string) string {
 	return "Plan: " + slug
 }
 
-// body is the pull request body, used only until the first transcript sync
-// replaces it.
+// body is the pull request body: the header written when the share opens. It is
+// not the transcript — ADR-003 puts the conversation in the comments, one per
+// completed agent turn, because a rewritten body notifies nobody and cannot hold
+// a conversation past 65,536 characters.
 func body(override, slug string) string {
 	if override != "" {
 		return override
 	}
 	return fmt.Sprintf(
 		"Shared planning thread for `%s`, opened before any code exists.\n\n"+
-			"herdr-huddle keeps the agent's conversation in this body and the work in the diff. "+
+			"herdr-huddle posts the agent's conversation as comments below, one per turn, and leaves the work in the diff. "+
 			"Comments are injected into the agent only when they start with `/agent`, come from a "+
 			"collaborator, and are on this share's allowlist.", slug)
 }

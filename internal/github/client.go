@@ -310,8 +310,11 @@ const maxLoginLen = 39
 // AddCollaborator invites a user with read access, which ADR-001 identifies as
 // the least a commenter needs.
 //
-// GitHub answers 204 when the user is already a collaborator, so a second invite
-// is not an error.
+// Documentation and measurement disagree here: the API documentation implies a
+// second invite answers 204, but inviting someone who already has access was
+// measured to answer 422 Validation Failed. A caller that has to know whether
+// the person can read the repository asks HasAccess rather than reading this
+// error.
 func (c *Client) AddCollaborator(ctx context.Context, owner, repo, login string) error {
 	// The login becomes a URL path segment, so it is checked against GitHub's
 	// own rules rather than trusted.
@@ -332,4 +335,28 @@ func (c *Client) AddCollaborator(ctx context.Context, owner, repo, login string)
 			login, repoPath(owner, repo), err)
 	}
 	return err
+}
+
+// HasAccess reports whether a login can already read the repository.
+//
+// It exists because an invitation is a request for access, and access that is
+// already there is not a failure: measured, inviting a `write` collaborator
+// answers 422 rather than the documented 204. Without this, asking to share a
+// thread with someone who can already read it would leave them off the
+// allowlist, and their comments would be ignored on a pull request they can see.
+func (c *Client) HasAccess(ctx context.Context, owner, repo, login string) (bool, error) {
+	if !loginRE.MatchString(login) || len(login) > maxLoginLen {
+		return false, fmt.Errorf("github: %q is not a GitHub login", login)
+	}
+	// 204 for a collaborator, 404 for anyone else: the status is the answer, so
+	// there is nothing to decode.
+	err := c.do(ctx, http.MethodGet, repoPath(owner, repo)+"/collaborators/"+url.PathEscape(login), nil, nil)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }

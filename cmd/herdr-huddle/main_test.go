@@ -268,6 +268,99 @@ func TestRunShareDryRunNeedsNoToken(t *testing.T) {
 	}
 }
 
+// The poller only knows what to drive from what is on disk, and this is the only
+// place the share's origin is written. It is tested through the store because
+// the parts each had a test while the wiring between them did not: `share`
+// recorded the repository and the pull request and dropped the agent, so every
+// share opened on this machine was retired on the poller's first pass and the
+// thread never received a transcript.
+func TestRecordShareKeepsTheAgentItIsBoundTo(t *testing.T) {
+	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	result := share.Result{
+		Repo:        repo.Slug{Host: "github.com", Owner: "DnzzL", Name: "molkky"},
+		Branch:      "herdr/molkky",
+		Base:        "master",
+		PullRequest: github.PullRequest{Number: 13, HTMLURL: "https://github.com/DnzzL/molkky/pull/13"},
+		Allowlist:   []string{"DnzzL"},
+	}
+	origin := share.Origin{
+		Agent: "pi", PaneID: "wQ:p1", CWD: "/home/thomas/Projects/molkky",
+		Kind: "pi", Session: "/home/thomas/.pi/agent/sessions/s.jsonl", SessionID: "01a0c4d1",
+	}
+
+	now := time.Date(2026, 9, 21, 18, 33, 42, 0, time.UTC)
+	if _, _, err := recordShare(store, result, origin, now); err != nil {
+		t.Fatalf("recordShare: %v", err)
+	}
+
+	states, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("recorded %d shares, want 1", len(states))
+	}
+	got := states[0]
+	if got.Origin != origin {
+		t.Errorf("Origin = %+v, want %+v", got.Origin, origin)
+	}
+	if !got.Active() {
+		t.Errorf("the share is not active: %+v", got)
+	}
+}
+
+// Re-running `share` from the pane is how a retired share is picked back up: the
+// record keeps where the sync got to and stops being retired. Without this, a
+// share that was opened from outside a pane — or before the fix above — could
+// never be repaired without deleting its state by hand.
+func TestRecordShareRevivesARetiredShare(t *testing.T) {
+	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	result := share.Result{
+		Repo:        repo.Slug{Host: "github.com", Owner: "DnzzL", Name: "molkky"},
+		Branch:      "herdr/molkky",
+		Base:        "master",
+		PullRequest: github.PullRequest{Number: 13},
+	}
+	origin := share.Origin{Agent: "pi", PaneID: "wQ:p1", Kind: "pi"}
+	now := time.Date(2026, 9, 21, 18, 33, 42, 0, time.UTC)
+
+	retired := time.Date(2026, 9, 21, 18, 38, 26, 0, time.UTC)
+	dead := share.State{
+		Repo: "DnzzL/molkky", Branch: "herdr/molkky", Base: "master", Number: 13,
+		Cursors:   share.Cursors{Comment: 7, ETag: `W/"abc"`},
+		RetiredAt: &retired, CreatedAt: now, UpdatedAt: retired,
+	}
+	if err := store.Put(dead); err != nil {
+		t.Fatal(err)
+	}
+
+	state, resumed, err := recordShare(store, result, origin, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("recordShare: %v", err)
+	}
+	if !resumed {
+		t.Error("resumed = false, want the existing thread picked up rather than created")
+	}
+	if !state.Active() {
+		t.Errorf("the share is still retired: %+v", state)
+	}
+	// What was already delivered must not be delivered again, and what was
+	// already posted must not be posted again.
+	if state.Cursors.Comment != 7 || state.Cursors.ETag != `W/"abc"` {
+		t.Errorf("cursors = %+v, want the delivered ones kept", state.Cursors)
+	}
+	states, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("recorded %d shares, want 1", len(states))
+	}
+	if states[0].Origin.PaneID != "wQ:p1" {
+		t.Errorf("Origin = %+v, want the pane it was re-opened from", states[0].Origin)
+	}
+}
+
 func TestEffectiveIntervalReportsTheDefaultItWillUse(t *testing.T) {
 	// The banner must not claim "0s" when the default is doing the work.
 	if got := effectiveInterval(0); got != poll.DefaultInterval {
