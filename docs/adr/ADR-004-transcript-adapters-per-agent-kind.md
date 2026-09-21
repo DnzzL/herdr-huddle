@@ -118,6 +118,11 @@ and `claude`.
   (51 ms and 3.4 MB at the time of writing, every 10 s per active share). Tailing
   the file would cost less; it was left alone because the cursor is what makes
   the render cheap, not the read.
+- unknown: two pi message roles render as nothing: `bashExecution` (a
+  `!command` the operator ran inside pi) and `system`. Both are in the real
+  session measured here. Silence is defensible for a system message and less so
+  for something the operator did, but either way it is silent — the switch has no
+  default, so a future role behaves the same way.
 - unknown: whether a compaction summary is better capped at 4,000 characters.
   Measured summaries ran 14,716 to 44,259 characters; the cap is a judgement
   about a planning thread, not a technical limit, and it is one constant to

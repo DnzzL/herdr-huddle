@@ -136,6 +136,9 @@ func writePiMessage(out *strings.Builder, r PiRecord, opts Options) {
 	case "toolResult":
 		writePiToolResult(out, r)
 	}
+	// Other roles render as nothing: measured in a real session, `bashExecution`
+	// (a !command the operator ran) and `system`. ADR-004's known gaps records
+	// that as undecided rather than as a decision.
 }
 
 func writePiHumanTurn(out *strings.Builder, r PiRecord) {
