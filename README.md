@@ -67,6 +67,10 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
 
 ## What the two of you see
 
+- **Your collaborator installs nothing.** No Herdr, no herdr-huddle, no token:
+  the thread is a normal pull request, and the URL is the whole invitation. On a
+  private repository they still need read access to comment at all — see the
+  limits below.
 - **The pull request body** is a header, written once when the share opens. It
   says what the thread is and what the `/agent` rules are.
 - **The transcript** arrives as comments, one per completed agent turn, each
@@ -75,6 +79,10 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
 - **Instructions** are comments that start with `/agent`. They are delivered to
   the agent tagged as third-party input carrying the author's login, so the agent
   has no reason to treat them as coming from you.
+- **The only acknowledgement is a 👀 reaction**, added when your instruction is
+  held back because the agent is busy. A refused one gets nothing: the reason
+  (`not on the allowlist`, `does not start with /agent`) goes to the operator's
+  log and nowhere public. Silence means "check with whoever runs the poller".
 - **The diff is empty** until *you* commit. Uncommitted work is deliberately not
   mirrored: a diff that changes under a reviewer without a commit is a lie.
 
@@ -101,10 +109,10 @@ The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
   no file can be found, this falls back to
   reading the pane's terminal and labels the comment as a partial transcript —
   readable, but with no cursor for incremental sync and collapsed tool calls.
-- **No transcript comment has been posted to a real pull request yet.** The API
-  is exercised against a fake server and the git side against a local bare
-  repository; the only real share so far pushed its branch and opened its draft
-  pull request, and then stopped there. See `## Known gaps` in ADR-002, ADR-003
+- **Nothing has driven the agent from a real comment yet.** Transcript comments
+  have been posted for real — two on the first share's pull request — but the
+  inbound direction, a collaborator's `/agent` comment reaching the agent, has
+  only ever run against a fake server. See `## Known gaps` in ADR-002, ADR-003
   and ADR-004.
 
 ## Commands

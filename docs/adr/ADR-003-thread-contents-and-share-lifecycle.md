@@ -126,10 +126,16 @@ intentions. Each one is a decision that only became visible once the code ran.
 
 ## Known gaps
 
-- not tested: no transcript comment has ever been posted to a real pull request.
-  The comment API is exercised against a fake server with the real request
-  shapes. The share that would have posted the first one (DnzzL/molkky#13) was
-  recorded without its origin, so the poller retired it — see ADR-002's gaps.
+- verified once, by hand: two transcript comments really were posted, to
+  DnzzL/molkky#13, covering a light turn and a heavy one. Nothing in the test
+  suite covers that call against GitHub, so nothing detects a regression in it.
+- not verified: the inbound direction on GitHub. No `/agent` comment has ever
+  been turned into a delivery; it is exercised against a fake server only. The
+  acknowledgement (`eyes`) and the "waiting on the operator" marker have never
+  run against the real API either.
+- fixed after this was measured on a real share: the record was written without
+  its origin, so the poller retired DnzzL/molkky#13 on its first pass. See
+  ADR-002's gaps for what the fix did and does not cover.
 - not done: the process that reads a thread does not exist on the collaborator's
   side, because they do not run anything. If the operator's machine is asleep,
   their comment waits.
