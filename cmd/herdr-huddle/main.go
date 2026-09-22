@@ -134,22 +134,31 @@ Poll:
            --interval  how often to look, default 10s.
 
 Serve and join:
-  serve    Stream one agent pane to whoever joins. The pane defaults to the one
-           the single active share is bound to; --pane overrides it, and is
-           required when more than one share is active. Each joiner gets its
-           own read-only terminal stream, so a joiner that arrives late still
-           receives a complete screen. Nothing is written to the pane and
-           nothing is read from the joiner: steering happens through the
-           thread's comments (ADR-005).
-           --addr  where to listen; loopback by default, so a tunnel is a
-                   deliberate act rather than an accident.
+  serve    Stream a share's agent pane to whoever the gate lets in. The pane
+           and the allowlist come from the same active share, because the
+           allowlist is what gates the endpoint; --pane picks the share when
+           several are active. Every joiner gets its own read-only stream of
+           the pane, freshly painted from the top, and is checked against the
+           allowlist before a single frame is observed. Nothing is written to
+           the pane; the way to steer the agent is still a comment on the
+           thread.
+           --addr        where to listen; loopback by default.
+           --pane        which pane to stream.
            --cols, --rows  the viewport the stream is rendered at.
+           --no-tunnel   do not start a tunnel; serve on this address only.
+           Unless --no-tunnel is given, serve starts a quick tunnel (it needs
+           cloudflared installed) and prints the one line to send. Without
+           cloudflared it says so and serves locally instead.
   join     Join a live share: draw the stream in this terminal until it ends.
-           --addr  the server to join.
+             herdr-huddle join <address>      the line serve printed
+           --addr        the share to join when no address is given.
+           Presents the stored GitHub token, or runs GitHub's device flow in a
+           browser when there is none, and is refused without the share's
+           allowlist. One-way: a joiner sends only its identity.
 
-A share is the whole of it for now: share opens the thread, serve streams its
-agent live, and join is the other person's window into it. The writes to GitHub
-are still made by poll.
+A share is the whole of it: share opens the thread, serve streams its agent
+live, and join is the other person's window into it. The writes to GitHub are
+still made by poll.
 `)
 }
 
@@ -421,16 +430,20 @@ func effectiveInterval(flagValue time.Duration) time.Duration {
 	return poll.DefaultInterval
 }
 
-// runServe streams the pane a share is bound to. ADR-005 splits a share in two:
-// the ledger is GitHub and the transport is this. The pane is resolved from the
-// record rather than typed, because the record is where it was deliberately
-// captured at share time.
+// runServe streams a share's pane to whoever the gate lets in.
+//
+// ADR-006 makes `serve` own the door: it starts a quick tunnel when cloudflared
+// is available and prints the one line to send. Nobody configures a port, an
+// address, or a tunnel. What gates that public endpoint is the share's
+// allowlist, checked before the first frame, which is why the pane and the
+// allowlist come from the same record below.
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", defaultLiveAddr, "where to listen for joiners")
 	pane := fs.String("pane", "", "the pane to stream (default: the pane the active share is bound to)")
 	cols := fs.Int("cols", live.DefaultCols, "the width the stream is rendered at")
 	rows := fs.Int("rows", live.DefaultRows, "the height the stream is rendered at")
+	noTunnel := fs.Bool("no-tunnel", false, "do not start a tunnel; serve on this address only")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -438,13 +451,9 @@ func runServe(args []string) error {
 		return fmt.Errorf("%w: `serve` takes no positional arguments, got %q", errUsage, fs.Arg(0))
 	}
 
-	target := *pane
-	if target == "" {
-		resolved, err := paneToServe(shareStore())
-		if err != nil {
-			return err
-		}
-		target = resolved
+	state, err := shareForServe(shareStore(), *pane)
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := withSignals()
@@ -456,82 +465,158 @@ func runServe(args []string) error {
 	}
 
 	server := &live.Server{
-		Pane:    target,
+		Pane:    state.Origin.PaneID,
 		Cols:    *cols,
 		Rows:    *rows,
 		Observe: &live.HerdrObserver{},
+		Gate:    &live.Gate{Verify: live.GitHubVerifier{}, Allowlist: state.Allowlist},
 		Log: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
 		},
 	}
-	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s at %s (%dx%d)\n", target, ln.Addr(), *cols, *rows)
+	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s for %s (%dx%d)\n",
+		state.Origin.PaneID, state.Repo, *cols, *rows)
+
+	switch {
+	case *noTunnel:
+		printJoinLine("join from this machine:", ln.Addr().String())
+	default:
+		fmt.Fprintf(os.Stderr, "herdr-huddle: starting a tunnel…\n")
+		tunnel, err := live.StartTunnel(ctx, "", "http://"+ln.Addr().String())
+		switch {
+		case err == nil:
+			defer func() { _ = tunnel.Close() }()
+			printJoinLine("live share ready — send them:", tunnel.URL)
+		case errors.Is(err, live.ErrTunnelBinaryMissing):
+			fmt.Fprintf(os.Stderr, "herdr-huddle: cloudflared is not installed, so this share is local only.\n"+
+				"  install it (nix profile install nixpkgs#cloudflared, or environment.systemPackages = [ pkgs.cloudflared ]) and re-run for a link to send.\n")
+			printJoinLine("join from this machine:", ln.Addr().String())
+		default:
+			fmt.Fprintf(os.Stderr, "herdr-huddle: no tunnel: %v\n", err)
+			printJoinLine("join from this machine:", ln.Addr().String())
+		}
+	}
 	return server.Serve(ctx, ln)
 }
 
-// paneToServe finds the pane the live stream should carry. It refuses to guess:
-// a share with no pane has nothing to stream, and two active shares make the
-// answer ambiguous. Both are the operator's decision to make, so both say how
-// to make it.
-func paneToServe(store share.Store) (string, error) {
+// printJoinLine is the whole instruction the collaborator receives: one line
+// to send, one to run.
+func printJoinLine(what, endpoint string) {
+	fmt.Fprintf(os.Stderr, "herdr-huddle: %s\n  herdr-huddle join %s\n", what, endpoint)
+}
+
+// shareForServe resolves the pane *and* the gate from one active share.
+//
+// They cannot come from different places: the allowlist is the only thing
+// standing between a public endpoint and the pane (ADR-006), so a stream with
+// no share behind it has nothing to gate with and is refused here rather than
+// served open. --pane picks which share when several are active; it never
+// invents one.
+func shareForServe(store share.Store, pane string) (share.State, error) {
 	states, err := store.Load()
 	if err != nil {
-		return "", err
+		return share.State{}, err
 	}
-
-	var panes []string
+	var active []share.State
 	for _, state := range states {
 		if state.Active() && state.Origin.PaneID != "" {
-			panes = append(panes, state.Origin.PaneID)
+			active = append(active, state)
 		}
 	}
-	switch len(panes) {
-	case 0:
-		return "", errors.New("no active share is bound to a pane, so there is nothing to stream: run `share` from the agent's pane, or pass --pane")
+
+	if pane != "" {
+		var matching []share.State
+		for _, state := range active {
+			if state.Origin.PaneID == pane {
+				matching = append(matching, state)
+			}
+		}
+		switch len(matching) {
+		case 1:
+			return matching[0], nil
+		case 0:
+			return share.State{}, fmt.Errorf("no active share is bound to pane %s, so it has no allowlist to gate the stream: run `share` from that pane first", pane)
+		default:
+			return share.State{}, fmt.Errorf("pane %s is bound to more than one active share, so which allowlist gates the stream is ambiguous", pane)
+		}
+	}
+
+	switch len(active) {
 	case 1:
-		return panes[0], nil
+		return active[0], nil
+	case 0:
+		return share.State{}, errors.New("no active share is bound to a pane, so there is nothing to stream and no allowlist to gate it: run `share` from the agent's pane, or pass --pane")
 	default:
-		return "", fmt.Errorf("more than one active share is bound to a pane (%s), so which to stream is ambiguous: pass --pane", strings.Join(panes, ", "))
+		panes := make([]string, 0, len(active))
+		for _, state := range active {
+			panes = append(panes, state.Origin.PaneID)
+		}
+		return share.State{}, fmt.Errorf("more than one active share is bound to a pane (%s), so which to stream is ambiguous: pass --pane", strings.Join(panes, ", "))
 	}
 }
 
-// runJoin draws a live stream in this terminal. Phase 1 is one-way by design:
-// the joiner receives frames and sends nothing, and the way to steer is a
-// comment on the thread (ADR-005).
+// runJoin joins a live share: present who you are, then draw what the pane
+// shows, until it ends or Ctrl-C.
+//
+// Phase 2 is one-way: the joiner sends only the hello, and the way to steer
+// the agent is still a comment on the thread (ADR-005).
 func runJoin(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
-	addr := fs.String("addr", defaultLiveAddr, "the server to join")
+	addr := fs.String("addr", defaultLiveAddr, "the share to join when no address is given")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("%w: `join` takes no positional arguments, got %q", errUsage, fs.Arg(0))
+	if fs.NArg() > 1 {
+		return fmt.Errorf("%w: `join` takes at most one address, got %q and %q", errUsage, fs.Arg(0), fs.Arg(1))
+	}
+	endpoint := *addr
+	if fs.NArg() == 1 {
+		endpoint = fs.Arg(0)
 	}
 
 	ctx, stop := withSignals()
 	defer stop()
 
-	conn, err := net.Dial("tcp", *addr)
+	token, err := joinToken(ctx)
 	if err != nil {
-		return fmt.Errorf("could not reach a live share at %s: %w", *addr, err)
+		return err
 	}
-	defer conn.Close()
 
-	// A Ctrl-C closes the connection, which is what tells the server to end this
-	// joiner's stream — and, with it, the observe child behind it.
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
-	fmt.Fprintf(os.Stderr, "herdr-huddle: joined the live share at %s (Ctrl-C to leave)\n", *addr)
-	err = live.Render(conn, os.Stdout)
+	fmt.Fprintf(os.Stderr, "herdr-huddle: joining %s (Ctrl-C to leave)\n", endpoint)
+	err = live.Join(ctx, endpoint, token, os.Stdout)
 	if ctx.Err() != nil {
-		// The operator left. Closing the connection is how this end leaves and
-		// what tells the server to end the stream, so the error that follows
-		// from it is the leaving, not a failure to report.
+		// The operator left. Ending the connection is how they leave, so the
+		// error that follows from it is the leaving, not a failure to report.
 		return nil
 	}
 	return err
+}
+
+// joinToken is the pairing half of the gate: the stored token when there is
+// one, GitHub's device flow in the browser otherwise.
+//
+// The device-flow token is deliberately not saved — a scope-less identity
+// token must not overwrite the repo-scoped token `auth login` stores.
+func joinToken(ctx context.Context) (string, error) {
+	store := auth.TokenStore{}
+	if token, _, err := store.Load(ctx); err == nil && strings.TrimSpace(token) != "" {
+		return token, nil
+	}
+	clientID := resolveClientID()
+	if clientID == "" {
+		return "", errors.New("no stored token and no client id to pair with: run `herdr-huddle auth login` first, or set HERDR_HUDDLE_CLIENT_ID")
+	}
+	flow := auth.DeviceFlow{ClientID: clientID}
+	code, err := flow.Start(ctx)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(os.Stderr, "herdr-huddle: to join, open %s and enter %s\n", code.VerificationURI, code.UserCode)
+	token, err := flow.Wait(ctx, code)
+	if err != nil {
+		return "", err
+	}
+	return token.AccessToken, nil
 }
 
 // printPollResult reports one pass in the order the work happened.

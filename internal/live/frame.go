@@ -25,6 +25,9 @@ const (
 	TypeFrame  = "terminal.frame"
 	TypeClosed = "terminal.closed"
 	TypeError  = "error"
+	// TypeHello is the joiner's first record: who they are, proven by a
+	// GitHub token. It travels client-to-server only.
+	TypeHello = "hello"
 )
 
 // EncodingANSI is the only payload encoding Herdr sends, and the only one worth
@@ -53,6 +56,9 @@ type Frame struct {
 	Reason string `json:"reason,omitempty"`
 	// Message is set on our own error records only.
 	Message string `json:"message,omitempty"`
+	// Token is set on a hello record only: the GitHub token the gate checks
+	// before the first frame. Never logged, never written anywhere else.
+	Token string `json:"token,omitempty"`
 }
 
 // ParseFrame decodes one record.
@@ -116,6 +122,13 @@ func ErrorRecord(err error) []byte {
 		return []byte(`{"type":"error","message":"live: the stream failed"}` + "\n")
 	}
 	return append(line, '\n')
+}
+
+// ErrorRecordClosed is the deliberate end of a stream, as a record. Written
+// before the connection closes so the joiner's verdict comes from data rather
+// than from how the socket happened to shut.
+func ErrorRecordClosed() []byte {
+	return []byte(`{"type":"terminal.closed"}` + "\n")
 }
 
 // oneLine keeps an error readable when a record is long or chunky.

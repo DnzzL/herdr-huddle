@@ -112,5 +112,10 @@ transiently with `nix run`; local origin on `127.0.0.1:8791`):
 - **The gate does not exist yet**, so today the only thing standing between a public
   URL and the pane is that nobody has the URL. Rule 4 above is what keeps this from
   being a live exposure.
+- **Tokens can die and nothing refreshes them.** GitHub may issue expiring
+  access tokens (8 hours); when the stored one expires, `join` and `poll` both
+  fail until `auth login` runs again. The gate reports this honestly but has no
+  refresh path — observed live: a stored token was rejected with `401: Bad
+  credentials` mid-verification.
 - **`cloudflared` version pinning is undefined** — measured on nixpkgs 2026.9.1
   via `nix run`; nothing yet records which version a running `serve` used.

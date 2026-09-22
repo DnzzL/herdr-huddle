@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // fakeObserver is the seam that keeps these tests off a real Herdr session: it
@@ -126,22 +129,11 @@ func frameLine(seq int, text string) string {
 // is the one thing a fake cannot establish.
 func serveTest(t *testing.T, obs Observer) (addr string, stop func()) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	srv := &Server{
+		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
+		Gate: &Gate{Verify: &verifierStub{login: "tester"}, Allowlist: []string{"tester"}},
 	}
-	srv := &Server{Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		srv.Serve(ctx, ln)
-	}()
-	return ln.Addr().String(), func() {
-		cancel()
-		ln.Close()
-		<-done
-	}
+	return startServer(t, srv)
 }
 
 // A joiner dials in and gets rendered bytes. This is the whole of phase 1: a
@@ -283,13 +275,16 @@ func TestServerPassesRecordsThroughUnchanged(t *testing.T) {
 	addr, stop := serveTest(t, obs)
 	defer stop()
 
-	raw, err := io.ReadAll(dial(t, addr))
+	recs, err := readRecords(dial(t, addr))
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("read records: %v", err)
+	}
+	if len(recs) == 0 {
+		t.Fatal("no records arrived")
 	}
 	var got map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
-		t.Fatalf("the first record is not JSON: %v (%q)", err, raw)
+	if err := json.Unmarshal(recs[0], &got); err != nil {
+		t.Fatalf("the first record is not JSON: %v (%q)", err, recs[0])
 	}
 	var want map[string]any
 	if err := json.Unmarshal([]byte(line), &want); err != nil {
@@ -300,14 +295,67 @@ func TestServerPassesRecordsThroughUnchanged(t *testing.T) {
 	}
 }
 
-func dial(t *testing.T, addr string) net.Conn {
+// dialSilent connects the way a probe does: TCP open, no hello. The gate is
+// what happens to it.
+func dialSilent(t *testing.T, addr string) net.Conn {
 	t.Helper()
-	conn, err := net.Dial("tcp", addr)
+	conn, _, err := websocket.Dial(context.Background(), "ws://"+addr, nil)
 	if err != nil {
 		t.Fatalf("dial %s: %v", addr, err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	netConn := websocket.NetConn(context.Background(), conn, websocket.MessageBinary)
+	t.Cleanup(func() { _ = netConn.Close() })
+	return netConn
+}
+
+// dial connects and says who it is, which is what every joiner must do before
+// a single frame is observed.
+
+// readRecords reads until a terminal record (closed or error), the way the
+// real client does. Anything after that is connection teardown, which the
+// protocol deliberately does not depend on: the verdict travels as data.
+func readRecords(r io.Reader) ([][]byte, error) {
+	scanner := bufio.NewScanner(r)
+	var recs [][]byte
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		recs = append(recs, line)
+		if frame, err := ParseFrame(line); err == nil &&
+			(frame.Type == TypeClosed || frame.Type == TypeError) {
+			return recs, nil
+		}
+	}
+	return recs, scanner.Err()
+}
+
+func dial(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	conn := dialSilent(t, addr)
+	if _, err := io.WriteString(conn, `{"token":"test-token","type":"hello"}`+"\n"); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
 	return conn
+}
+
+// startServer runs a Server of the caller's choosing, for the cases where the
+// default one (allowlisted, permissive) is not the point.
+func startServer(t *testing.T, srv *Server) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv.Serve(ctx, ln)
+	}()
+	return ln.Addr().String(), func() {
+		cancel()
+		_ = ln.Close()
+		<-done
+	}
 }
 
 // The reason a pane went away is the only useful thing a joiner can be told, so
@@ -321,5 +369,101 @@ func TestServerRelaysAReasonToTheJoiner(t *testing.T) {
 	err := Render(dial(t, addr), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "w99:p99") {
 		t.Fatalf("error = %v, want the relayed reason", err)
+	}
+}
+
+// The gate runs before anything is observed: a refused joiner costs no child
+// process and sees no frames. This is the property ADR-006 calls the entire
+// boundary for a public endpoint.
+func TestServerRefusesAJoinerBeforeOpeningAStream(t *testing.T) {
+	obs := &fakeObserver{lines: []string{frameLine(1, "never rendered")}}
+	srv := &Server{
+		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
+		Gate: &Gate{Verify: &verifierStub{login: "stranger"}, Allowlist: []string{"DnzzL", "pagbrl"}},
+	}
+	addr, stop := startServer(t, srv)
+	defer stop()
+
+	var out bytes.Buffer
+	err := Render(dial(t, addr), &out)
+	if err == nil {
+		t.Fatal("a joiner off the allowlist must be refused")
+	}
+	if !strings.Contains(err.Error(), "stranger") {
+		t.Errorf("error = %v, want it to name the refused login", err)
+	}
+	if obs.openedCount() != 0 {
+		t.Errorf("opened %d streams for a refused joiner, want 0", obs.openedCount())
+	}
+	if out.Len() != 0 {
+		t.Errorf("rendered %q to a refused joiner, want nothing", out.String())
+	}
+}
+
+// A token GitHub cannot confirm is refused the same way, before any stream.
+func TestServerRefusesATokenGitHubCannotConfirm(t *testing.T) {
+	obs := &fakeObserver{}
+	srv := &Server{
+		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
+		Gate: &Gate{Verify: &verifierStub{err: errors.New("github: 401 Bad credentials")}, Allowlist: []string{"tester"}},
+	}
+	addr, stop := startServer(t, srv)
+	defer stop()
+
+	err := Render(dial(t, addr), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("error = %v, want GitHub's reason", err)
+	}
+	if obs.openedCount() != 0 {
+		t.Errorf("opened %d streams for an unverifiable token, want 0", obs.openedCount())
+	}
+}
+
+// A joiner that opens the port and says nothing is dropped rather than held.
+func TestServerDropsAJoinerThatNeverSaysHello(t *testing.T) {
+	obs := &fakeObserver{block: true}
+	srv := &Server{
+		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
+		Gate:        &Gate{Verify: &verifierStub{login: "tester"}, Allowlist: []string{"tester"}},
+		GateTimeout: 150 * time.Millisecond,
+	}
+	addr, stop := startServer(t, srv)
+	defer stop()
+
+	// Read through the client's own reader: the verdict comes from the error
+	// record, not from how the connection was torn down afterwards.
+	err := Render(dialSilent(t, addr), io.Discard)
+	if err == nil {
+		t.Fatal("a joiner that never says hello must be dropped")
+	}
+	if !strings.Contains(err.Error(), "hello") {
+		t.Errorf("error = %v, want the server to say what it was waiting for", err)
+	}
+	if obs.openedCount() != 0 {
+		t.Errorf("opened %d streams for a silent joiner, want 0", obs.openedCount())
+	}
+}
+
+// The stream's verdict must arrive as data: the joiner's reader decides from
+// records, and a teardown it cannot control must not change the answer.
+func TestServerEndsTheStreamWithARecordWhenHerdrDoesNot(t *testing.T) {
+	obs := &fakeObserver{lines: []string{frameLine(1, "the pane, then silence")}}
+	addr, stop := serveTest(t, obs)
+	defer stop()
+
+	recs, err := readRecords(dial(t, addr))
+	if err != nil {
+		t.Fatalf("read records: %v", err)
+	}
+	if len(recs) == 0 {
+		t.Fatal("no records arrived")
+	}
+	var last Frame
+	if err := json.Unmarshal(recs[len(recs)-1], &last); err != nil {
+		t.Fatalf("last record is not JSON: %v", err)
+	}
+	if last.Type != TypeClosed {
+		t.Errorf("last record = %q, want %q so the joiner knows it ended deliberately",
+			last.Type, TypeClosed)
 	}
 }

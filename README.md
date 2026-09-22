@@ -98,18 +98,30 @@ agent already said and watching it say it.
 
 ```
 # on your machine, in the pane's project
-./bin/herdr-huddle serve          # defaults to the pane the active share is bound to
+./bin/herdr-huddle serve
+#   herdr-huddle: live share ready — send them:
+#     herdr-huddle join https://k3f9x1.trycloudflare.com
 
-# on the other machine
-herdr-huddle join --addr <your-host>:8787
+# on the other machine — nothing to install but this binary
+herdr-huddle join https://k3f9x1.trycloudflare.com
 ```
 
+`serve` starts a quick tunnel itself and prints the one line to send (it needs
+`cloudflared` on your machine; without it, it says so and serves this machine
+only — `--no-tunnel` forces that). The collaborator installs nothing: no Herdr,
+no tunnel client, no account.
+
+- **Every joiner proves who they are first.** The client presents a GitHub
+  token — the stored one, or GitHub's device flow in a browser if there is none —
+  and the server checks it against the share's allowlist **before a single frame
+  is observed**. A refused joiner is told why (`@x is not on this share's
+  allowlist`, `401: Bad credentials`) and sees no frames at all.
 - **Each joiner gets their own read-only stream** of the pane, freshly painted
   from the top, so someone arriving late sees a whole screen rather than the tail
   of one. Several people can join at once.
 - **Nothing is written to the pane and nothing is read back from the joiner.**
-  The stream is one direction only: the terminal is the agent's, and the way to
-  steer it is still a comment on the thread.
+  The stream is one direction only: a joiner sends just its identity, and the way
+  to steer the agent is still a comment on the thread.
 - **Leaving is Ctrl-C.** Closing the tab or killing the client ends your stream
   and the observer behind it, and changes nothing else.
 
@@ -133,13 +145,21 @@ rather than left with a blank screen.
 - **`/agent` text is untrusted input.** The prompt that carries it says so, and
   carries the author's login. That is a defence, not a sandbox: an agent that
   obeys a comment can still do anything you could do.
-- **The live stream is unauthenticated and binds to loopback.** Anyone who can
-  reach the address sees the pane's screen, so `serve` listens on `127.0.0.1`
-  only. Do not put it on a public interface or behind a port-forward as it
-  stands: the door (Tailscale, or Cloudflare Access, or an SSH forced command)
-  and the identity check on top of it are the next phase, and until they exist
-  the port is the whole of the gate. The allowlist does not apply to the stream
-  yet.
+- **The endpoint is public while `serve` runs, and the allowlist is the whole
+  gate.** `serve` still listens on `127.0.0.1`, but by default puts a Cloudflare
+  quick tunnel in front of it — and a quick tunnel cannot have Cloudflare Access
+  in front either (it needs a zone of yours). So GitHub pairing — token
+  presented first, allowlist checked before the first frame — is the *only*
+  thing between that URL and your pane: no rate limit, no second factor.
+  Refusals are logged on your side and reported to the joiner.
+  `--no-tunnel` removes the exposure entirely. The token itself only ever
+  travels over `wss://` or loopback; the client refuses a cleartext address.
+- **A dead token refuses cleanly.** If GitHub no longer accepts the stored
+  token, the gate says `GitHub could not confirm the token` and shows nothing;
+  run `herdr-huddle auth login` again. (The same dead token stops `poll` from
+  posting, so the two fail together.)
+- **The token the collaborator pairs with is not saved** — it is used to prove
+  who they are for that session only, and never replaces your repo-scoped one.
 - **The live view is one-way.** The joiner's client cannot type, upvote or
   interrupt yet; steering still goes through `/agent` comments. The stream is
   read-only *by construction*: it runs `herdr terminal session observe`, which
@@ -169,14 +189,16 @@ herdr-huddle auth status
 herdr-huddle auth logout
 herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
 herdr-huddle poll [--once] [--interval 10s]
-herdr-huddle serve [--pane id] [--addr 127.0.0.1:8787] [--cols n] [--rows n]
-herdr-huddle join [--addr 127.0.0.1:8787]
+herdr-huddle serve [--pane id] [--addr 127.0.0.1:8787] [--cols n] [--rows n] [--no-tunnel]
+herdr-huddle join [address] [--addr 127.0.0.1:8787]
 ```
 
-`serve` streams one pane to whoever joins it. It streams the pane the single
-active share is bound to; pass `--pane` when more than one share is active, or
-when there is no share at all. `join` draws that stream in the current terminal
-until it ends.
+`serve` streams one pane to whoever the gate lets in. The pane **and** the
+allowlist come from the same active share — no share, no server, because there
+would be nothing to gate it with; `--pane` picks which share when several are
+active. It starts a quick tunnel unless `--no-tunnel` is given and prints the
+line to send. `join` takes that address (or `--addr`), proves who you are, and
+draws the stream in the current terminal until it ends.
 
 `share --dry-run` reports what would happen and changes nothing — no token
 needed, no branch, no push, no pull request. `poll --once` makes a single pass and
