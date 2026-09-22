@@ -25,10 +25,8 @@ func TestJoinDrawsTheStream(t *testing.T) {
 // them debugging their terminal.
 func TestJoinSurfacesARefusal(t *testing.T) {
 	obs := &fakeObserver{}
-	srv := &Server{
-		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
-		Gate: &Gate{Verify: &verifierStub{login: "stranger"}, Allowlist: []string{"pagbrl"}},
-	}
+	srv := newTestServer(obs)
+	srv.Gate = &Gate{Verify: &verifierStub{login: "stranger"}, Allowlist: []string{"pagbrl"}}
 	addr, stop := startServer(t, srv)
 	defer stop()
 

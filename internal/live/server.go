@@ -3,20 +3,31 @@ package live
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/DnzzL/herdr-huddle/internal/thread"
 )
 
 // maxRecordBytes is the ceiling on one stream record. A full paint of a wide
 // pane is the largest thing Herdr sends and it is large; the cap exists so a
 // runaway producer is a failure rather than unbounded memory.
 const maxRecordBytes = 8 << 20
+
+// Ledger posts the record of a delivered instruction to the thread. It may
+// fail; the queue retries it, because delivery never waits for the record.
+type Ledger interface {
+	Post(ctx context.Context, in thread.LiveInstruction) error
+}
 
 // Observer starts a live stream for one pane. It is an interface so the server
 // can be exercised without a Herdr session.
@@ -61,6 +72,26 @@ type Server struct {
 	// GateTimeout bounds how long a joiner has to present their hello before
 	// being dropped. Zero means DefaultGateTimeout.
 	GateTimeout time.Duration
+	// Instructor delivers a joiner's words to the agent. Required: without it
+	// a say would vanish silently.
+	Instructor Instructor
+	// Ledger records delivered instructions on the thread. Required. A failing
+	// ledger is queued and flushed — delivery never waits for it (ADR-005).
+	Ledger Ledger
+	// ThreadURL is the pull request the share is bound to, quoted back to the
+	// agent so it knows where the message came from.
+	ThreadURL string
+	// LedgerInterval is how often a queued record is retried. Zero means
+	// DefaultLedgerInterval.
+	LedgerInterval time.Duration
+	// LedgerTimeout bounds one post attempt. Zero means
+	// DefaultLedgerTimeout. It exists because the GitHub client sets no
+	// timeout of its own: an unanswered post must become a queued record, not
+	// a goroutine holding a record that is neither posted nor queued.
+	LedgerTimeout time.Duration
+
+	ledgerMu sync.Mutex
+	pending  []thread.LiveInstruction
 	// Log receives one line per connection event.
 	Log func(format string, args ...any)
 }
@@ -103,13 +134,96 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		_ = ln.Close()
 	}()
 
-	if err := hs.Serve(ln); err != nil {
-		if ctx.Err() != nil {
-			return nil
-		}
+	go s.flushLoop(ctx)
+
+	if err := hs.Serve(ln); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("live: serve: %w", err)
 	}
+	// A record owed at shutdown is owed forever: the queue is in memory, so
+	// say how much was lost rather than exiting clean.
+	if n := s.queuedCount(); n > 0 {
+		s.logf("shutting down with %d instruction record(s) never posted to the thread", n)
+	}
 	return nil
+}
+
+// DefaultLedgerInterval is how often a queued record is retried.
+const DefaultLedgerInterval = 10 * time.Second
+
+// DefaultLedgerTimeout bounds one post attempt.
+const DefaultLedgerTimeout = 30 * time.Second
+
+// flushLoop retries queued records until the server stops. An idle pass costs
+// a length check, the same bargain the poller makes (ADR-001).
+func (s *Server) flushLoop(ctx context.Context) {
+	interval := s.LedgerInterval
+	if interval <= 0 {
+		interval = DefaultLedgerInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.flush(ctx)
+		}
+	}
+}
+
+// maxQueuedRecords bounds what a broken ledger may hold.
+const maxQueuedRecords = 100
+
+// flush posts what is queued, keeping whatever still fails.
+func (s *Server) flush(ctx context.Context) {
+	s.ledgerMu.Lock()
+	if len(s.pending) == 0 {
+		s.ledgerMu.Unlock()
+		return
+	}
+	batch := s.pending
+	s.pending = nil
+	s.ledgerMu.Unlock()
+
+	var keep []thread.LiveInstruction
+	for _, in := range batch {
+		postCtx, cancel := s.ledgerCtx(ctx)
+		err := s.Ledger.Post(postCtx, in)
+		cancel()
+		if err != nil {
+			keep = append(keep, in)
+			s.logf("still could not record @%s's instruction: %v", in.Author, err)
+		}
+	}
+	if len(keep) == 0 {
+		return
+	}
+	s.ledgerMu.Lock()
+	// Oldest first, including whatever arrived meanwhile; the cap keeps a
+	// permanently broken ledger from growing without bound.
+	s.pending = append(keep, s.pending...)
+	if overflow := len(s.pending) - maxQueuedRecords; overflow > 0 {
+		s.pending = s.pending[overflow:]
+		s.logf("dropped %d oldest instruction record(s): the ledger has been failing for too long", overflow)
+	}
+	s.ledgerMu.Unlock()
+}
+
+// ledgerCtx bounds one ledger attempt without shortening the connection's
+// own lifetime. The caller cancels it.
+func (s *Server) ledgerCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.LedgerTimeout
+	if timeout <= 0 {
+		timeout = DefaultLedgerTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func (s *Server) queuedCount() int {
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+	return len(s.pending)
 }
 
 // serveGuard is everything that must be true before a connection is accepted.
@@ -128,6 +242,12 @@ func (s *Server) serveGuard() error {
 	}
 	if len(s.Gate.Allowlist) == 0 {
 		return errors.New("live: the share's allowlist is empty, so nobody could join: run `share` first")
+	}
+	if s.Instructor == nil {
+		return errors.New("live: an instructor is required, or a joiner's instructions would vanish silently")
+	}
+	if s.Ledger == nil {
+		return errors.New("live: a ledger is required, or delivered instructions would never reach the record")
 	}
 	return nil
 }
@@ -219,15 +339,28 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	}
 	defer stream.Close()
 
-	// A joiner sends nothing in this direction after the hello in phase 2, so
-	// any read result means it is gone. Watching for that is what stops a
-	// disconnect leaking one `herdr terminal session observe` child per
-	// joiner, forever — the cancelled context is what kills it. When
-	// instructions arrive from a joiner, this becomes the reader for them
-	// rather than a discard.
+	// This is the reader for everything a joiner says, and the watcher that
+	// ends their stream when they leave: a read result is either an
+	// instruction or a departure, and a departure must take the observe child
+	// with it — one leaked child per departed joiner, forever, otherwise —
+	// which the cancelled context below prevents.
 	go func() {
-		_, _ = io.Copy(io.Discard, reader)
-		cancel()
+		defer cancel()
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxRecordBytes)
+		for scanner.Scan() {
+			record, err := ParseFrame(scanner.Bytes())
+			if err != nil {
+				// Never echo: a record can carry instruction text, and this
+				// goes to a log.
+				s.logf("joiner %s: ignoring a record it could not parse", conn.RemoteAddr())
+				continue
+			}
+			if record.Type != TypeSay {
+				continue
+			}
+			s.speak(ctx, conn, login, record.Text)
+		}
 	}()
 
 	scanner := bufio.NewScanner(stream)
@@ -276,6 +409,57 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 		if _, err := conn.Write(ErrorRecordClosed()); err != nil {
 			s.logf("joiner %s: could not report the end of the stream: %v", conn.RemoteAddr(), err)
 		}
+	}
+}
+
+// speak delivers one instruction and reports the outcome to the joiner.
+//
+// Order is the whole design: the words go to the agent first and the record
+// follows, so neither the ledger's availability nor its round trip stands
+// between a person and the agent (ADR-005). The record is written only for
+// instructions that were delivered — a comment claiming the agent received
+// something it refused would poison the trace.
+func (s *Server) speak(ctx context.Context, conn net.Conn, login, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		s.ack(conn, StatusFailed, "the message was empty")
+		return
+	}
+	instruction := thread.Instruction{Author: login, Text: text, URL: s.ThreadURL}
+	if err := s.Instructor.Deliver(ctx, s.Pane, instruction.Prompt()); err != nil {
+		status, reason := deliveryFailure(err)
+		s.logf("instruction from @%s not delivered: %v", login, err)
+		s.ack(conn, status, reason)
+		return
+	}
+	s.ack(conn, StatusSent, "")
+
+	record := thread.LiveInstruction{Author: login, Text: text, At: time.Now()}
+	// Off this goroutine on purpose: "delivery never waits for the record"
+	// (ADR-005) has to hold for latency as well as for failure. A ledger call
+	// taking its time must not delay the *next* instruction's delivery, and
+	// the only reader of this connection is the loop that delivers.
+	go func() {
+		postCtx, cancel := s.ledgerCtx(ctx)
+		defer cancel()
+		if err := s.Ledger.Post(postCtx, record); err != nil {
+			s.ledgerMu.Lock()
+			s.pending = append(s.pending, record)
+			s.ledgerMu.Unlock()
+			s.logf("could not record @%s's instruction yet: %v (queued)", login, err)
+		}
+	}()
+}
+
+// ack reports a say's outcome. Written as its own record — never an error
+// record, which would end the stream over a failed delivery.
+func (s *Server) ack(conn net.Conn, status, reason string) {
+	line, err := json.Marshal(Frame{Type: TypeSaid, Status: status, Reason: reason})
+	if err != nil {
+		return // Frame is a plain struct; this cannot fail
+	}
+	if _, err := conn.Write(append(line, '\n')); err != nil {
+		s.logf("joiner %s: could not report delivery: %v", conn.RemoteAddr(), err)
 	}
 }
 

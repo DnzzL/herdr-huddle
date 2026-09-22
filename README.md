@@ -119,9 +119,11 @@ no tunnel client, no account.
 - **Each joiner gets their own read-only stream** of the pane, freshly painted
   from the top, so someone arriving late sees a whole screen rather than the tail
   of one. Several people can join at once.
-- **Nothing is written to the pane and nothing is read back from the joiner.**
-  The stream is one direction only: a joiner sends just its identity, and the way
-  to steer the agent is still a comment on the thread.
+- **Type a line and it reaches the agent.** What you type is delivered
+  immediately — wrapped as a colleague's unverified message carrying your login,
+  exactly the treatment `/agent` comments get — and recorded on the pull request
+  afterwards. A held delivery (the agent is waiting for its operator) or a failed
+  one is reported in your terminal; nothing is silently dropped.
 - **Leaving is Ctrl-C.** Closing the tab or killing the client ends your stream
   and the observer behind it, and changes nothing else.
 
@@ -160,11 +162,21 @@ rather than left with a blank screen.
   posting, so the two fail together.)
 - **The token the collaborator pairs with is not saved** — it is used to prove
   who they are for that session only, and never replaces your repo-scoped one.
-- **The live view is one-way.** The joiner's client cannot type, upvote or
-  interrupt yet; steering still goes through `/agent` comments. The stream is
-  read-only *by construction*: it runs `herdr terminal session observe`, which
-  takes no input, no resize and no takeover, so there is no code path here that
-  could write to the pane even if a client sent bytes.
+- **The pane stays read-only by construction; the steering path does not.**
+  The stream runs `herdr terminal session observe`, which takes no input, no
+  resize and no takeover, so no code path can write to the pane itself. What a
+  joiner types goes to the agent's prompt instead — allowlist-gated, attributed,
+  wrapped as third-party input — through the same door the poller uses for
+  `/agent` comments. Typing into the pane directly stays discouraged: the agent
+  would record it as the operator's own words.
+- **The record trails delivery, by design.** Every delivered instruction is
+  posted to the thread as a comment opening with this tool's marker, so the
+  poller recognises it as ours and never delivers it a second time; it
+  attributes its author and says it arrived live. GitHub's issue-comment API has
+  no reply threading, so the record attributes the turn rather than nesting it.
+  If GitHub is unreachable, records queue (up to 100) and are retried while
+  `serve` runs — delivery never waits for them — and anything still queued at
+  shutdown is logged, not hidden.
 - **The stream is rendered at the size the server chose** (`--cols`, `--rows`,
   default 100×30), not at the joiner's window size. A narrow terminal will wrap.
 - **Nothing starts the stream for you.** `serve` is a foreground command you run
@@ -198,7 +210,7 @@ allowlist come from the same active share — no share, no server, because there
 would be nothing to gate it with; `--pane` picks which share when several are
 active. It starts a quick tunnel unless `--no-tunnel` is given and prints the
 line to send. `join` takes that address (or `--addr`), proves who you are, and
-draws the stream in the current terminal until it ends.
+draws the stream in the current terminal — type a line to send it to the agent.
 
 `share --dry-run` reports what would happen and changes nothing — no token
 needed, no branch, no push, no pull request. `poll --once` makes a single pass and

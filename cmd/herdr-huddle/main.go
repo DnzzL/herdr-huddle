@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -148,13 +149,19 @@ Serve and join:
            --no-tunnel   do not start a tunnel; serve on this address only.
            Unless --no-tunnel is given, serve starts a quick tunnel (it needs
            cloudflared installed) and prints the one line to send. Without
-           cloudflared it says so and serves locally instead.
-  join     Join a live share: draw the stream in this terminal until it ends.
+           cloudflared it says so and serves locally instead. It also delivers
+           what joiners type straight to the agent, then records each
+           delivered instruction on the thread — the record is queued and
+           retried if GitHub is unreachable, and delivery never waits for it.
+  join     Join a live share: draw the stream in this terminal, and type a
+           line to send it to the agent.
              herdr-huddle join <address>      the line serve printed
            --addr        the share to join when no address is given.
            Presents the stored GitHub token, or runs GitHub's device flow in a
            browser when there is none, and is refused without the share's
-           allowlist. One-way: a joiner sends only its identity.
+           allowlist. What you type is delivered to the agent immediately and
+           recorded on the thread afterwards; a held or failed delivery is
+           reported here rather than silently dropped.
 
 A share is the whole of it: share opens the thread, serve streams its agent
 live, and join is the other person's window into it. The writes to GitHub are
@@ -465,11 +472,14 @@ func runServe(args []string) error {
 	}
 
 	server := &live.Server{
-		Pane:    state.Origin.PaneID,
-		Cols:    *cols,
-		Rows:    *rows,
-		Observe: &live.HerdrObserver{},
-		Gate:    &live.Gate{Verify: live.GitHubVerifier{}, Allowlist: state.Allowlist},
+		Pane:       state.Origin.PaneID,
+		Cols:       *cols,
+		Rows:       *rows,
+		Observe:    &live.HerdrObserver{},
+		Gate:       &live.Gate{Verify: live.GitHubVerifier{}, Allowlist: state.Allowlist},
+		Instructor: live.HerdrInstructor{},
+		Ledger:     threadLedger(ctx, state),
+		ThreadURL:  state.URL,
 		Log: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
 		},
@@ -497,6 +507,28 @@ func runServe(args []string) error {
 		}
 	}
 	return server.Serve(ctx, ln)
+}
+
+// threadLedger is the record half of steering: delivered instructions are
+// posted to the pull request with the operator's token.
+//
+// A missing or dead token is not fatal — delivery never waits for the record
+// (ADR-005), so instructions arrive live and their records queue until the
+// ledger works again. The warning is printed once, at startup, because the
+// first failed post would otherwise be the first sign.
+func threadLedger(ctx context.Context, state share.State) *thread.InstructionLedger {
+	owner, name := state.Owner()
+	store := auth.TokenStore{}
+	token, _, err := store.Load(ctx)
+	if err != nil || strings.TrimSpace(token) == "" {
+		fmt.Fprintf(os.Stderr, "herdr-huddle: no usable operator token: instructions will still reach the agent, but their records will queue until you run `herdr-huddle auth login`\n")
+	}
+	return &thread.InstructionLedger{
+		Client: &github.Client{Token: token},
+		Owner:  owner,
+		Repo:   name,
+		Number: state.Number,
+	}
 }
 
 // printJoinLine is the whole instruction the collaborator receives: one line
@@ -582,14 +614,51 @@ func runJoin(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "herdr-huddle: joining %s (Ctrl-C to leave)\n", endpoint)
-	err = live.Join(ctx, endpoint, token, os.Stdout)
-	if ctx.Err() != nil {
-		// The operator left. Ending the connection is how they leave, so the
-		// error that follows from it is the leaving, not a failure to report.
-		return nil
+	session, err := live.Dial(ctx, endpoint, token)
+	if err != nil {
+		return err
 	}
-	return err
+	defer session.Close()
+
+	fmt.Fprintf(os.Stderr, "herdr-huddle: joined %s (Ctrl-C to leave)\n", endpoint)
+	fmt.Fprintf(os.Stderr, "herdr-huddle: type a line and press enter to send it to the agent\n")
+
+	// Two directions, two loops: frames are drawn as they arrive while stdin
+	// stays live for instructions, so the agent's next words and the
+	// collaborator's next words never queue behind each other.
+	drawDone := make(chan error, 1)
+	go func() { drawDone <- session.Draw(os.Stdout, os.Stderr) }()
+
+	sayCh := make(chan string)
+	go func() {
+		defer close(sayCh)
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			sayCh <- scanner.Text()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Ctrl-C: ending the connection is how they leave, so the error
+			// that follows from it is the leaving, not a failure to report.
+			return nil
+		case err := <-drawDone:
+			return err
+		case line, ok := <-sayCh:
+			if !ok {
+				sayCh = nil // stdin ended; keep watching the stream
+				continue
+			}
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if err := session.Say(line); err != nil {
+				return fmt.Errorf("could not send: %w", err)
+			}
+		}
+	}
 }
 
 // joinToken is the pairing half of the gate: the stored token when there is

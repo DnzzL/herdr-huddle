@@ -452,3 +452,50 @@ func TestEndCursor_OfAPiSession(t *testing.T) {
 		t.Errorf("a freshly primed share replayed %q", turn.Markdown)
 	}
 }
+
+// The record of an instruction delivered live must never be read back as an
+// instruction to deliver: that would run the colleague's text a second time
+// through the poller. The Marker is what makes it ours, and the body never
+// starting with the prefix is the same guard from the other side.
+func TestTheLiveInstructionCommentIsNeverReReadAsAnInstruction(t *testing.T) {
+	body := LiveInstruction{
+		Author: "pagbrl",
+		Text:   "add a rule: three consecutive misses eliminates the player",
+		At:     time.Date(2026, 9, 22, 16, 40, 0, 0, time.UTC),
+	}.Body()
+
+	if !strings.HasPrefix(body, Marker+"\n") {
+		t.Errorf("body must open with the marker so the poller recognises it as ours:\n%s", body)
+	}
+	if !strings.Contains(body, "@pagbrl") {
+		t.Errorf("body must attribute the instruction to its author:\n%s", body)
+	}
+	if strings.HasPrefix(body, Prefix) {
+		t.Errorf("body must not start with %q — that is the instruction prefix:\n%s", Prefix, body)
+	}
+	if !strings.Contains(body, "three consecutive misses") {
+		t.Errorf("body must carry the instruction text verbatim:\n%s", body)
+	}
+	if !strings.Contains(body, "sent live") {
+		t.Errorf("body must say the instruction arrived live, so the record is not misleading:\n%s", body)
+	}
+
+	// The whole point: feed our own comment back through the poller's reader.
+	var comment github.Comment
+	comment.ID = 9001
+	comment.Body = body
+	comment.Association = "COLLABORATOR"
+	comment.User.Login = "pagbrl"
+
+	instructions, refusals := Instructions(
+		[]github.Comment{comment},
+		[]string{"DnzzL", "pagbrl"},
+		0,
+	)
+	if len(instructions) != 0 {
+		t.Errorf("the poller would deliver %d instructions from our own record — a second delivery of text the agent already has", len(instructions))
+	}
+	if len(refusals) != 0 {
+		t.Errorf("refusals = %v, want none: our own output is not a denied instruction", refusals)
+	}
+}

@@ -31,6 +31,10 @@ type fakeObserver struct {
 	// block holds a stream open until the test releases it, so a disconnecting
 	// joiner can be observed.
 	block bool
+	// release, when set, ends every stream on close: the stream then reports
+	// EOF, and the server closes the joiner cleanly. It exists because a
+	// stream that dies on its own races whatever the test is asserting.
+	release chan struct{}
 
 	mu      sync.Mutex
 	opened  int
@@ -45,13 +49,26 @@ func (f *fakeObserver) Observe(ctx context.Context, pane string, cols, rows int)
 		return nil, f.observeErr
 	}
 	f.opened++
+	released := f.release
+	if released == nil {
+		released = make(chan struct{})
+	}
+	// An observer with no lines is a stream that ends immediately, not one
+	// empty record — an empty line is a malformed record to the server, and
+	// would end the joiner with a failure instead of a plain close.
+	content := ""
+	if len(f.lines) > 0 {
+		content = strings.Join(f.lines, "\n") + "\n"
+	}
+	// A release switch means the test ends the stream, so the stream holds
+	// open until then — otherwise it would EOF before the test says its piece.
 	s := &fakeStream{
 		ctx:      ctx,
-		reader:   strings.NewReader(strings.Join(f.lines, "\n") + "\n"),
+		reader:   strings.NewReader(content),
 		waitErr:  f.waitErr,
-		block:    f.block,
+		block:    f.block || f.release != nil,
 		onClose:  func() { f.mu.Lock(); f.closed++; f.mu.Unlock() },
-		released: make(chan struct{}),
+		released: released,
 		done:     make(chan struct{}),
 	}
 	f.streams = append(f.streams, s)
@@ -127,13 +144,22 @@ func frameLine(seq int, text string) string {
 
 // serveTest starts a server on a real loopback listener, because the transport
 // is the one thing a fake cannot establish.
+// newTestServer is the fully wired default: a permissive gate, a fake
+// instructor and a fake ledger, because serveGuard requires all three. Tests
+// override only the part they are about.
+func newTestServer(obs Observer) *Server {
+	return &Server{
+		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
+		Gate:       &Gate{Verify: &verifierStub{login: "tester"}, Allowlist: []string{"tester"}},
+		Instructor: &fakeInstructor{},
+		Ledger:     &fakeLedger{},
+		ThreadURL:  "https://github.com/acme/demo/pull/1",
+	}
+}
+
 func serveTest(t *testing.T, obs Observer) (addr string, stop func()) {
 	t.Helper()
-	srv := &Server{
-		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
-		Gate: &Gate{Verify: &verifierStub{login: "tester"}, Allowlist: []string{"tester"}},
-	}
-	return startServer(t, srv)
+	return startServer(t, newTestServer(obs))
 }
 
 // A joiner dials in and gets rendered bytes. This is the whole of phase 1: a
@@ -349,7 +375,14 @@ func startServer(t *testing.T, srv *Server) (string, func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = srv.Serve(ctx, ln)
+		err := srv.Serve(ctx, ln)
+		// If the server refuses to start, close the listener straight away:
+		// otherwise a dial connects into a backlog nobody accepts, and the
+		// client hangs instead of reporting the startup failure.
+		if err != nil {
+			t.Errorf("Serve refused to start: %v", err)
+			_ = ln.Close()
+		}
 	}()
 	return ln.Addr().String(), func() {
 		cancel()
@@ -377,10 +410,8 @@ func TestServerRelaysAReasonToTheJoiner(t *testing.T) {
 // boundary for a public endpoint.
 func TestServerRefusesAJoinerBeforeOpeningAStream(t *testing.T) {
 	obs := &fakeObserver{lines: []string{frameLine(1, "never rendered")}}
-	srv := &Server{
-		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
-		Gate: &Gate{Verify: &verifierStub{login: "stranger"}, Allowlist: []string{"DnzzL", "pagbrl"}},
-	}
+	srv := newTestServer(obs)
+	srv.Gate = &Gate{Verify: &verifierStub{login: "stranger"}, Allowlist: []string{"DnzzL", "pagbrl"}}
 	addr, stop := startServer(t, srv)
 	defer stop()
 
@@ -403,10 +434,8 @@ func TestServerRefusesAJoinerBeforeOpeningAStream(t *testing.T) {
 // A token GitHub cannot confirm is refused the same way, before any stream.
 func TestServerRefusesATokenGitHubCannotConfirm(t *testing.T) {
 	obs := &fakeObserver{}
-	srv := &Server{
-		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
-		Gate: &Gate{Verify: &verifierStub{err: errors.New("github: 401 Bad credentials")}, Allowlist: []string{"tester"}},
-	}
+	srv := newTestServer(obs)
+	srv.Gate = &Gate{Verify: &verifierStub{err: errors.New("github: 401 Bad credentials")}, Allowlist: []string{"tester"}}
 	addr, stop := startServer(t, srv)
 	defer stop()
 
@@ -422,11 +451,8 @@ func TestServerRefusesATokenGitHubCannotConfirm(t *testing.T) {
 // A joiner that opens the port and says nothing is dropped rather than held.
 func TestServerDropsAJoinerThatNeverSaysHello(t *testing.T) {
 	obs := &fakeObserver{block: true}
-	srv := &Server{
-		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
-		Gate:        &Gate{Verify: &verifierStub{login: "tester"}, Allowlist: []string{"tester"}},
-		GateTimeout: 150 * time.Millisecond,
-	}
+	srv := newTestServer(obs)
+	srv.GateTimeout = 150 * time.Millisecond
 	addr, stop := startServer(t, srv)
 	defer stop()
 

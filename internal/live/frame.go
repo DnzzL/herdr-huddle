@@ -28,6 +28,12 @@ const (
 	// TypeHello is the joiner's first record: who they are, proven by a
 	// GitHub token. It travels client-to-server only.
 	TypeHello = "hello"
+	// TypeSay is an instruction from a joiner who is already past the gate.
+	// Client-to-server only.
+	TypeSay = "say"
+	// TypeSaid reports what became of a say: delivered, held, or failed.
+	// Server-to-client, and never terminal — the stream carries on.
+	TypeSaid = "said"
 )
 
 // EncodingANSI is the only payload encoding Herdr sends, and the only one worth
@@ -49,16 +55,22 @@ type Frame struct {
 	Full     bool   `json:"full"`
 	Width    int    `json:"width"`
 	Height   int    `json:"height"`
-	// Reason is set when the stream ended for a reason worth telling the joiner.
-	// Herdr reports a pane that is gone as a clean exit with
-	// "terminal target <pane> not found" here, so a closed record is not always
-	// an ordinary ending.
+	// Reason is set when the record exists to explain itself: on a closed
+	// record, why the stream ended (Herdr reports a pane that is gone as a
+	// clean exit with "terminal target <pane> not found", so a closed record
+	// is not always an ordinary ending); on a said record, why the instruction
+	// was not simply sent.
 	Reason string `json:"reason,omitempty"`
 	// Message is set on our own error records only.
 	Message string `json:"message,omitempty"`
 	// Token is set on a hello record only: the GitHub token the gate checks
 	// before the first frame. Never logged, never written anywhere else.
 	Token string `json:"token,omitempty"`
+	// Text is the instruction on a say record, verbatim.
+	Text string `json:"text,omitempty"`
+	// Status is what a said record reports back: one of the Status*
+	// constants. Reason (above) carries why, when it was not simply sent.
+	Status string `json:"status,omitempty"`
 }
 
 // ParseFrame decodes one record.
@@ -93,7 +105,7 @@ func ParseFrame(line []byte) (Frame, error) {
 // a client does.
 func (f Frame) Known() bool {
 	switch f.Type {
-	case TypeFrame, TypeClosed, TypeError:
+	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid:
 		return true
 	}
 	return false

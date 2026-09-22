@@ -19,7 +19,7 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
 
 - **Participant.** One operator + one or more collaborators who join the operator's machine-bound world and run nothing of their own (no agent, no checkout, no Herdr). A peer bringing their own environment is explicitly out of scope.
 - **Live view (out).** The daemon runs `herdr terminal session observe <pane>` locally and streams the frames onward to connected joiners. The collaborator never connects to Herdr's socket, never opens a shell, never sends bytes in that direction: read-only is true by construction, not by client behaviour and not by Herdr's grace.
-- **Steering (in).** A comment arriving from an authenticated joiner is allowlist-checked and injected immediately (`herdr agent prompt`), without waiting for a poll pass. The daemon then posts it to the PR — attributed, anchored as a reply to the turn it refers to. Delivery is never blocked by GitHub's availability.
+- **Steering (in).** An instruction arriving from an authenticated joiner **over the live connection** is injected immediately (`herdr agent prompt`), without waiting for a poll pass — the gate that admitted them is the same allowlist. The daemon then posts the record to the PR, attributed to its author and labelled as having arrived live. GitHub's issue-comment API offers no reply anchoring (no `in_reply_to` on the create endpoint; issue comments are flat — verified against the REST docs), so the record attributes the turn instead of threading it under it. Delivery is never blocked by GitHub's availability.
 - **The record.** The PR thread remains the canonical, append-only transcript (ADR-003's shape is unchanged: one comment per completed turn). The daemon posts the collaborator's live instructions retroactively as comments; if posting fails, it queues and flushes later rather than steering off the record. The record must eventually hold everything that happened; nothing in the delivery path waits for it.
 - **Identity.** The collaborator's device-flow GitHub token is the proof for both halves: the same token that posts comments gains the live stream, and the allowlist decides who is a participant at all. **The door.** A transport that reaches a home machine without accounts-ssh-key-on-the-box is required for the stream to cross the internet. **Superseded by ADR-006**: the door is an implementation detail owned by `serve` — a Cloudflare quick tunnel, WebSocket as transport, device-flow pairing as the gate. Tailscale (GitHub a native IdP, ACLs scoping one person to one port, P2P with managed relay fallback) is the private-by-default reserve; a locked-down SSH account (`authorized_keys` with a single forced command) stays the last resort, but the identity is a key, not GitHub.
 - **The join client.** `herdr-huddle join` — the client a collaborator runs to join a live share: it renders the frame stream, carries a comment box, and reuses device-flow auth. Live Share for a terminal agent: a live share of the agent's pane, whose participants can speak to it — not a co-editing session, and with the PR thread beneath it as the permanent record. Later, a browser client consuming the same stream replaces it without touching anything underneath.
@@ -43,28 +43,29 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
 
 ## Known gaps
 
-- **Phase 1 (the daemon-side stream) is built and verified locally**: `serve`
-  runs `herdr terminal session observe` per joiner and pipes the frames
-  unchanged; `join` draws them. Verified on 0.9.0 against a live pane on this
-  machine — a real screen drawn in another process over TCP through
-  (`127.0.0.1:8787`), two joiners at once, a pane that does not exist reported
-  as `terminal target w99:p99 not found`, and no `observe` child left behind
-  when a joiner leaves.
-- **The stream has no identity check at all.** It is loopback-only for that
-  reason: reaching the port is the whole of the gate, and the allowlist (which
-  does not yet apply here) is not consulted. The door and the collaborator's
-  device-flow proof are phases 2 and 3, and the port must not be reachable from
-  off the machine before they land.
+- **Built and verified locally across phases 1–4**: `serve` streams a pane's
+  frames per joiner over WebSocket (each joiner its own `observe`, a late
+  joiner still gets a complete first paint, a missing pane reported by name,
+  no child left behind when a joiner leaves); the gate admits or refuses on
+  GitHub identity plus the share's allowlist *before* any frame is observed;
+  `join` draws the stream and delivers typed instructions through
+  `herdr agent prompt`, recording each delivered one on the thread. Verified on
+  0.9.0 against real GitHub (a dead token refused with zero bytes drawn, a gate
+  pass logged) and against this machine's share record.
+- **Live injection has never met a real agent.** The delivery path runs to the
+  `herdr agent prompt` call, but no agent pane exists on this machine to receive
+  one, and the operator's token is expired. Blocked/queued/held outcomes are
+  exercised against fakes that speak herdr's error codes, not against herdr.
 - **Nothing manages the serve process.** It is a foreground command with no
   lock, no idle rule and no supervision by the plugin, and it survives nothing:
-  no reconnect after a network blip, no restart of a dead pane's stream beyond
-  the joiner being told and reconnecting. Its relation to the startup hook and to
-  ADR-003's "no active share" fast path is undecided.
-- **The agent-status summary is not built.** ADR-005's phase 1 names it (`herdr api snapshot`) alongside the frame stream, as the thing that tells a joiner *what* the agent is doing rather than only what it is printing. Phase 1 ships the frames alone; a joiner sees the pane, not whether the agent is working, blocked or idle.
-- **No comment box.** The client is output-only as built; the live-injection
-  path (allowlist → `agent prompt` → GitHub record) is phase 4, and the shape of
-  that comment's record (reply-to-turn vs reply-to-message, attribution line) is
-  still unverified against the real API.
+  no reconnect after a network blip or a dead `cloudflared`, no restart of a
+  dead pane's stream beyond the joiner being told and reconnecting. Its relation
+  to the startup hook and to ADR-003's "no active share" fast path is undecided.
+- **The agent-status summary is not built.** Phase 1 names it (`herdr api
+  snapshot`) alongside the frame stream, as the thing that tells a joiner *what*
+  the agent is doing rather than only what it is printing; the stream ships the
+  frames alone, so a joiner sees the pane, not whether the agent is working,
+  blocked or idle.
 - **The viewport is the server's, not the joiner's.** Each stream is rendered at
   one fixed size chosen at startup; a joiner's real window size is not sent, so
   a narrow terminal wraps. Resize, scrollback and an agent restart mid-stream

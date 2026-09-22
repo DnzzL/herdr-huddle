@@ -137,11 +137,8 @@ func TestServerRefusesToStartWithoutAGate(t *testing.T) {
 func TestTheHelloErrorNeverEchoesTheToken(t *testing.T) {
 	secret := "gho_super_secret_token_value"
 	obs := &fakeObserver{}
-	srv := &Server{
-		Pane: "w1:p1", Cols: 80, Rows: 12, Observe: obs,
-		Gate:        &Gate{Verify: &verifierStub{login: "tester"}, Allowlist: []string{"tester"}},
-		GateTimeout: 2 * time.Second,
-	}
+	srv := newTestServer(obs)
+	srv.GateTimeout = 2 * time.Second
 	// The server logs its refusal *after* writing it to the joiner, so the
 	// log is read from another goroutine: guard it, and wait for the line
 	// rather than racing it.
