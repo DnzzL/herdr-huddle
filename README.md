@@ -22,9 +22,43 @@ instruction reaches the agent immediately and lands on a pull request afterwards
 attributed.
 
 The pull request is the artifact. The agent's turns arrive as comments, so does
-every instruction anyone gave live, and a comment beginning with `/agent` steers
-the agent even from people who never open a terminal. The agent stays in your
-terminal, under your control, and nothing is ever typed into your pane.
+every instruction anyone gave live, and a comment beginning with `/agent` is
+meant to steer the agent even from people who never open a terminal. The agent
+stays in your terminal, under your control, and nothing is ever typed into your
+pane.
+
+## Where this actually is
+
+Honest status, because the difference matters before you rely on it.
+
+**Proven end to end**, against real sockets, real terminals and a real pull
+request:
+
+- The live huddle — `serve` and `join`, the room, per-joiner viewports, resize,
+  the door, room chat, moderated steering, reconnect across a server restart.
+- The outbound record: transcript comments really were posted to a real pull
+  request.
+
+**Not proven yet**, and each one is a thing a second person would hit:
+
+- **No `/agent` comment has ever reached a real agent.** The inbound half of the
+  thread has only run against a fake server. It is the feature this README opens
+  with, and it is the least verified thing here.
+- **`--invite` has been measured once**, against a login that already had
+  access. Whether a work org permits the collaborator invitation at all is
+  unknown.
+- **Live steering has never met a real agent** either — the path runs to the
+  `herdr agent prompt` call and is exercised against fakes.
+- **A `serve` restart loses the record of instructions it had not yet posted.**
+  The queue is in memory. The pull request is the artifact, so this is the gap
+  that costs the most.
+- **Tokens expire (GitHub issues 8-hour ones) and nothing refreshes them.** When
+  yours dies, `poll` stops recording and `join` stops working until you run
+  `auth login` again.
+
+So: fine for you and one person you trust, live, with the pull request read as a
+record rather than relied on as a complete one. Not yet fine for handing to
+somebody who will steer by comment or expect `--invite` to work.
 
 ## How it works
 
@@ -266,10 +300,9 @@ only you can answer, at your terminal. Herdr refuses a prompt to a blocked agent
 outright and this tool does not try; it posts a comment saying the agent is
 waiting, so your collaborator is not left guessing.
 
-**The inbound comment path has never met a real collaborator.** Transcript
-comments have been posted for real, but a `/agent` comment reaching the agent has
-only ever run against a fake server. See `## Known gaps` in ADR-002, ADR-003 and
-ADR-004.
+**The unproven paths are listed at the top**, under "Where this actually is" —
+the inbound `/agent` comment, `--invite`, live steering against a real agent,
+and the in-memory record queue. `## Known gaps` in each ADR carries the detail.
 
 <details>
 <summary><b>More limits, in detail</b> — GitHub's constraints, the record, the stream, the TUI</summary>
