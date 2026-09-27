@@ -14,6 +14,7 @@
 package live
 
 import (
+	"cmp"
 	"context"
 	"os"
 	"strings"
@@ -50,7 +51,9 @@ func TestLiveInjectionReachesARealAgent(t *testing.T) {
 	instruction := thread.Instruction{
 		Author: "huddle-probe",
 		Text:   "Reply with exactly " + marker + " and nothing else. Make no changes to any file.",
-		URL:    "https://github.com/DnzzL/molkky/pull/13",
+		// Only ever quoted back to the agent, so a placeholder is honest here;
+		// point it at a real thread with HUDDLE_LIVE_URL when that matters.
+		URL: cmp.Or(os.Getenv("HUDDLE_LIVE_URL"), "https://github.com/acme/demo/pull/13"),
 	}
 
 	// Exactly the call `Server.speak` makes — not a shortcut around it.

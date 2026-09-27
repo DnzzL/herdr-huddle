@@ -280,15 +280,15 @@ func TestRunShareDryRunNeedsNoToken(t *testing.T) {
 func TestRecordShareKeepsTheAgentItIsBoundTo(t *testing.T) {
 	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
 	result := share.Result{
-		Repo:        repo.Slug{Host: "github.com", Owner: "DnzzL", Name: "molkky"},
-		Branch:      "herdr/molkky",
+		Repo:        repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"},
+		Branch:      "herdr/demo",
 		Base:        "master",
-		PullRequest: github.PullRequest{Number: 13, HTMLURL: "https://github.com/DnzzL/molkky/pull/13"},
+		PullRequest: github.PullRequest{Number: 13, HTMLURL: "https://github.com/acme/demo/pull/13"},
 		Allowlist:   []string{"DnzzL"},
 	}
 	origin := share.Origin{
-		Agent: "pi", PaneID: "wQ:p1", CWD: "/home/thomas/Projects/molkky",
-		Kind: "pi", Session: "/home/thomas/.pi/agent/sessions/s.jsonl", SessionID: "01a0c4d1",
+		Agent: "pi", PaneID: "wQ:p1", CWD: "/home/user/Projects/demo",
+		Kind: "pi", Session: "/home/user/.pi/agent/sessions/s.jsonl", SessionID: "01a0c4d1",
 	}
 
 	now := time.Date(2026, 9, 21, 18, 33, 42, 0, time.UTC)
@@ -319,8 +319,8 @@ func TestRecordShareKeepsTheAgentItIsBoundTo(t *testing.T) {
 func TestRecordShareRevivesARetiredShare(t *testing.T) {
 	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
 	result := share.Result{
-		Repo:        repo.Slug{Host: "github.com", Owner: "DnzzL", Name: "molkky"},
-		Branch:      "herdr/molkky",
+		Repo:        repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"},
+		Branch:      "herdr/demo",
 		Base:        "master",
 		PullRequest: github.PullRequest{Number: 13},
 	}
@@ -329,7 +329,7 @@ func TestRecordShareRevivesARetiredShare(t *testing.T) {
 
 	retired := time.Date(2026, 9, 21, 18, 38, 26, 0, time.UTC)
 	dead := share.State{
-		Repo: "DnzzL/molkky", Branch: "herdr/molkky", Base: "master", Number: 13,
+		Repo: "acme/demo", Branch: "herdr/demo", Base: "master", Number: 13,
 		Cursors:   share.Cursors{Comment: 7, ETag: `W/"abc"`},
 		RetiredAt: &retired, CreatedAt: now, UpdatedAt: retired,
 	}

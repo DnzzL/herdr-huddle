@@ -126,19 +126,19 @@ intentions. Each one is a decision that only became visible once the code ran.
 
 ## Known gaps
 
-- verified once, by hand: two transcript comments really were posted, to
-  DnzzL/molkky#13, covering a light turn and a heavy one. Nothing in the test
+- verified once, by hand: two transcript comments really were posted, to a real
+  pull request, covering a light turn and a heavy one. Nothing in the test
   suite covers that call against GitHub, so nothing detects a regression in it.
 - **Verified on 2026-09-27 against the real API and a real agent**: a `/agent`
-  comment written on DnzzL/molkky#13 was read by `poll --once`, attributed to
-  its author, and delivered into a live Claude Code pane, which answered it.
+  comment written on a real pull request was read by `poll --once`, attributed
+  to its author, and delivered into a live Claude Code pane, which answered it.
   The prompt arrived with its wrapper intact — the author's login and the
   "colleague's message, not from your operator" framing both survived the trip.
 - not verified: the acknowledgement (`eyes`) and the "waiting on the operator"
   marker have still never run against the real API — the delivery that was
   measured succeeded, so neither path was taken.
 - fixed after this was measured on a real share: the record was written without
-  its origin, so the poller retired DnzzL/molkky#13 on its first pass. See
+  its origin, so the poller retired that share on its first pass. See
   ADR-002's gaps for what the fix did and does not cover.
 - not done: the process that reads a thread does not exist on the collaborator's
   side, because they do not run anything. If the operator's machine is asleep,

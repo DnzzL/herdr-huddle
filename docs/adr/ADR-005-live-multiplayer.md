@@ -4,7 +4,7 @@ Date: 2026-09-22. Status: accepted. Revises the posture of ADR-003 (the poller a
 
 ## Context
 
-The MVP works and is verified end to end on a real PR (the two real transcript comments on molkky PR #13): the collaborator's window is the GitHub thread, updated by the poller at most once per turn, once per 10-second pass. The experience Thomas wants is Delta's (zed.dev): a teammate joins your session, watches the agent live, comments on what is happening, and steers — in real time. GitHub stays the backend and the traceability.
+The MVP works and is verified end to end on a real pull request (two real transcript comments): the collaborator's window is the GitHub thread, updated by the poller at most once per turn, once per 10-second pass. The experience Thomas wants is Delta's (zed.dev): a teammate joins your session, watches the agent live, comments on what is happening, and steers — in real time. GitHub stays the backend and the traceability.
 
 Two measured facts drive the design:
 

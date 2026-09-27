@@ -10,7 +10,7 @@ import (
 func TestRenderWritesTheDecodedFrames(t *testing.T) {
 	stream := strings.Join([]string{
 		frameLine(1, "first"),
-		`{"type":"terminal.title","title":"pi - molkky"}`,
+		`{"type":"terminal.title","title":"pi - demo"}`,
 		frameLine(2, "-second"),
 		`{"type":"terminal.closed"}`,
 	}, "\n") + "\n"

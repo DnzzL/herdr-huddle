@@ -82,8 +82,8 @@ these are worth pinning before the code exists.
 - not covered by a test: the branch, empty commit, base selection, idempotency
   and push are exercised against a local bare repository, and the API against a
   fake server. They have run against GitHub exactly once, by hand: `share`
-  pushed `herdr/molkky` and opened draft PR #13 on DnzzL/molkky, and a second run
-  reused both. Nothing detects a regression in that path.
+  pushed a share branch and opened a draft pull request on a real repository,
+  and a second run reused both. Nothing detects a regression in that path.
 - not verified: the invitation path. Measured once against a login that already
   had access (422), never for a login that had none.
 - not done: `share` records the share and opens the thread, but the transcript
