@@ -21,8 +21,8 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
 - **Live view (out).** The daemon runs `herdr terminal session observe <pane>` locally and streams the frames onward to connected joiners. The collaborator never connects to Herdr's socket, never opens a shell, never sends bytes in that direction: read-only is true by construction, not by client behaviour and not by Herdr's grace.
 - **Steering (in).** An instruction arriving from an authenticated joiner **over the live connection** is injected immediately (`herdr agent prompt`), without waiting for a poll pass — the gate that admitted them is the same allowlist. The daemon then posts the record to the PR, attributed to its author and labelled as having arrived live. GitHub's issue-comment API offers no reply anchoring (no `in_reply_to` on the create endpoint; issue comments are flat — verified against the REST docs), so the record attributes the turn instead of threading it under it. Delivery is never blocked by GitHub's availability.
 - **The record.** The PR thread remains the canonical, append-only transcript (ADR-003's shape is unchanged: one comment per completed turn). The daemon posts the collaborator's live instructions retroactively as comments; if posting fails, it queues and flushes later rather than steering off the record. The record must eventually hold everything that happened; nothing in the delivery path waits for it.
-- **Identity.** The collaborator's device-flow GitHub token is the proof for both halves: the same token that posts comments gains the live stream, and the allowlist decides who is a participant at all. **The door.** A transport that reaches a home machine without accounts-ssh-key-on-the-box is required for the stream to cross the internet. **Superseded by ADR-006**: the door is an implementation detail owned by `serve` — a Cloudflare quick tunnel, WebSocket as transport, device-flow pairing as the gate. Tailscale (GitHub a native IdP, ACLs scoping one person to one port, P2P with managed relay fallback) is the private-by-default reserve; a locked-down SSH account (`authorized_keys` with a single forced command) stays the last resort, but the identity is a key, not GitHub.
-- **The join client.** `herdr-huddle join` — the client a collaborator runs to join a live share: it renders the frame stream, carries a comment box, and reuses device-flow auth. Live Share for a terminal agent: a live share of the agent's pane, whose participants can speak to it — not a co-editing session, and with the PR thread beneath it as the permanent record. Later, a browser client consuming the same stream replaces it without touching anything underneath.
+- **Identity.** The collaborator's device-flow GitHub token is the proof for both halves: the same token that posts comments gains the live stream, and the allowlist decides who is a participant at all. **Refined by ADR-007**: the allowlist is still the one list, but the operator may extend it at the door instead of only at `share` time. **The door.** A transport that reaches a home machine without accounts-ssh-key-on-the-box is required for the stream to cross the internet. **Superseded by ADR-006**: the door is an implementation detail owned by `serve` — a Cloudflare quick tunnel, WebSocket as transport, device-flow pairing as the gate. Tailscale (GitHub a native IdP, ACLs scoping one person to one port, P2P with managed relay fallback) is the private-by-default reserve; a locked-down SSH account (`authorized_keys` with a single forced command) stays the last resort, but the identity is a key, not GitHub.
+- **The join client.** `herdr-huddle join` — the client a collaborator runs to join a live share: it renders the frame stream, carries a comment box, and reuses device-flow auth. **Refined by ADR-007**: it is a TUI with the room's presence and the agent's status beside the pane, and it asks for its own viewport. Live Share for a terminal agent: a live share of the agent's pane, whose participants can speak to it — not a co-editing session, and with the PR thread beneath it as the permanent record. Later, a browser client consuming the same stream replaces it without touching anything underneath.
 - **Where typing stays honest.** Typing *directly* into a Herdr-attached pane is out of scope and discouraged: pi would record it as an unattributed user message attributed to the operator, which corrupts the record's traceability. All collaboration-hour steering goes through the comment path, which both identifies the human and passes the allowlist.
 
 ## Alternatives rejected
@@ -61,15 +61,9 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
   no reconnect after a network blip or a dead `cloudflared`, no restart of a
   dead pane's stream beyond the joiner being told and reconnecting. Its relation
   to the startup hook and to ADR-003's "no active share" fast path is undecided.
-- **The agent-status summary is not built.** Phase 1 names it (`herdr api
-  snapshot`) alongside the frame stream, as the thing that tells a joiner *what*
-  the agent is doing rather than only what it is printing; the stream ships the
-  frames alone, so a joiner sees the pane, not whether the agent is working,
-  blocked or idle.
-- **The viewport is the server's, not the joiner's.** Each stream is rendered at
-  one fixed size chosen at startup; a joiner's real window size is not sent, so
-  a narrow terminal wraps. Resize, scrollback and an agent restart mid-stream
-  have not been watched beyond minutes.
+- **Scrollback and an agent restart mid-stream have not been watched beyond
+  minutes.** (The agent-status summary and the per-joiner viewport, both gaps
+  here, are built — see ADR-007.)
 - **Off-machine transport: partly measured.** The quick-tunnel WebSocket variant is
   measured (ADR-006); Tailscale (device share, Funnel) and Cloudflare Access remain
   untested in every variant.

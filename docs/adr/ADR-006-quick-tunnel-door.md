@@ -49,8 +49,9 @@ transiently with `nix run`; local origin on `127.0.0.1:8791`):
 3. **Pairing is the gate, and it is GitHub's device flow.** The join client performs
    the device flow in the human's browser and sends its token as the first message;
    the server resolves the login, checks the share's allowlist, and only then emits
-   the first frame. A token travels over `wss://` or loopback only — never a cleartext
-   bind. This is ADR-005's identity decision (one allowlist, two doors) made load-
+   the first frame. (**Extended by ADR-007**: a proven login the allowlist does not
+   hold is put to the operator rather than refused outright.) A token travels over
+   `wss://` or loopback only — never a cleartext bind. This is ADR-005's identity decision (one allowlist, two doors) made load-
    bearing: a quick tunnel cannot have Cloudflare Access in front of it (no zone of
    ours), so this check is the *entire* gate for a public endpoint.
 4. **Sequencing is a safety rule:** the tunnel is not enabled in any shipped path
@@ -109,9 +110,6 @@ transiently with `nix run`; local origin on `127.0.0.1:8791`):
   settings) or to other relays.
 - **No panic path for a flapping tunnel:** if `cloudflared` dies mid-session,
   `serve` currently has no defined behaviour (restart, report, or exit) — undecided.
-- **The gate does not exist yet**, so today the only thing standing between a public
-  URL and the pane is that nobody has the URL. Rule 4 above is what keeps this from
-  being a live exposure.
 - **Queued records are in memory only.** A `serve` restart loses whatever the
   ledger still owed; the shutdown log says how much, but nothing is persisted
   and replayed.

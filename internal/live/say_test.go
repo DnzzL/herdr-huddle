@@ -225,7 +225,7 @@ func TestUndeliveredInstructionsAreReportedAndNotRecorded(t *testing.T) {
 			}
 
 			said := waitSaid(t, session)
-			line := saidLine(said)
+			line := SaidLine(said)
 			for _, want := range c.wantInFeedback {
 				if !strings.Contains(line, want) {
 					t.Errorf("feedback = %q, want it to mention %q", line, want)

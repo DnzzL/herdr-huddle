@@ -40,6 +40,9 @@ type fakeObserver struct {
 	opened  int
 	closed  int
 	streams []*fakeStream
+	// asked records the viewport each stream was opened at, in order. A
+	// joiner's own terminal size is meant to reach here (ADR-007).
+	asked [][2]int
 }
 
 func (f *fakeObserver) Observe(ctx context.Context, pane string, cols, rows int) (Stream, error) {
@@ -49,6 +52,7 @@ func (f *fakeObserver) Observe(ctx context.Context, pane string, cols, rows int)
 		return nil, f.observeErr
 	}
 	f.opened++
+	f.asked = append(f.asked, [2]int{cols, rows})
 	released := f.release
 	if released == nil {
 		released = make(chan struct{})
@@ -79,6 +83,13 @@ func (f *fakeObserver) openedCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.opened
+}
+
+// viewports reports the sizes every stream was opened at, in order.
+func (f *fakeObserver) viewports() [][2]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][2]int(nil), f.asked...)
 }
 
 func (f *fakeObserver) closedCount() int {
@@ -308,9 +319,12 @@ func TestServerPassesRecordsThroughUnchanged(t *testing.T) {
 	if len(recs) == 0 {
 		t.Fatal("no records arrived")
 	}
+	// The room record arrives first and is ours; the pane's frames are what
+	// must survive the trip byte for byte.
+	raw := firstOfType(t, recs, TypeFrame)
 	var got map[string]any
-	if err := json.Unmarshal(recs[0], &got); err != nil {
-		t.Fatalf("the first record is not JSON: %v (%q)", err, recs[0])
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("the frame record is not JSON: %v (%q)", err, raw)
 	}
 	var want map[string]any
 	if err := json.Unmarshal([]byte(line), &want); err != nil {
@@ -492,4 +506,21 @@ func TestServerEndsTheStreamWithARecordWhenHerdrDoesNot(t *testing.T) {
 		t.Errorf("last record = %q, want %q so the joiner knows it ended deliberately",
 			last.Type, TypeClosed)
 	}
+}
+
+// firstOfType picks the first record of a kind out of a stream that now
+// carries presence alongside the pane.
+func firstOfType(t *testing.T, recs [][]byte, want string) []byte {
+	t.Helper()
+	for _, rec := range recs {
+		frame, err := ParseFrame(rec)
+		if err != nil {
+			t.Fatalf("record is not parseable: %v (%q)", err, rec)
+		}
+		if frame.Type == want {
+			return rec
+		}
+	}
+	t.Fatalf("no %s record in %d records", want, len(recs))
+	return nil
 }

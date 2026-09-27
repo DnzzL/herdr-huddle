@@ -3,7 +3,6 @@ package live
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,12 +44,14 @@ type Stream interface {
 	Wait() error
 }
 
-// Server serves one pane's live output to whoever connects.
+// Server serves one pane's live output to whoever the gate lets in.
 //
 // Each joiner gets its own Observer stream. That is deliberate and it is what
 // makes the second joiner correct: Herdr's first frame is a complete paint, and
 // only a fresh stream has one. Fanning a single stream out would leave every
-// late joiner with a viewport painted from some intermediate diff.
+// late joiner with a viewport painted from some intermediate diff — and it is
+// also what lets every joiner be rendered at their own terminal's size
+// (ADR-007), which costs nothing once the stream is already per-joiner.
 //
 // There is no queue and no fan-out here, so a slow joiner costs its own
 // observer and nothing else — and when it goes away, that observer goes with
@@ -58,9 +59,9 @@ type Stream interface {
 type Server struct {
 	// Pane is the Herdr pane whose output is served. Required.
 	Pane string
-	// Cols and Rows are the viewport the stream is rendered at. The server
-	// decides them, because it owns the observer; a joiner's window size is an
-	// upgrade for later, not a phase-1 concern.
+	// Cols and Rows are the viewport a joiner gets when it asks for none.
+	// A joiner that reports its own window size is served at that size
+	// instead, clamped (ADR-007).
 	Cols int
 	Rows int
 	// Observe starts a stream. Required.
@@ -79,8 +80,15 @@ type Server struct {
 	// ledger is queued and flushed — delivery never waits for it (ADR-005).
 	Ledger Ledger
 	// ThreadURL is the pull request the share is bound to, quoted back to the
-	// agent so it knows where the message came from.
+	// agent so it knows where the message came from, and carried to every
+	// joiner so the room can find its own record (ADR-007).
 	ThreadURL string
+	// Status reports what the agent is doing, for the room. Optional: without
+	// it the room simply never says.
+	Status Statuser
+	// StatusInterval is how often that is re-read while anyone is connected.
+	// Zero means DefaultStatusInterval.
+	StatusInterval time.Duration
 	// LedgerInterval is how often a queued record is retried. Zero means
 	// DefaultLedgerInterval.
 	LedgerInterval time.Duration
@@ -92,12 +100,22 @@ type Server struct {
 
 	ledgerMu sync.Mutex
 	pending  []thread.LiveInstruction
+
+	roomOnce sync.Once
+	huddle   *room
+
 	// Log receives one line per connection event.
 	Log func(format string, args ...any)
 }
 
 // DefaultGateTimeout is how long a joiner gets to say who they are.
 const DefaultGateTimeout = 15 * time.Second
+
+// room returns the shared presence state, built once.
+func (s *Server) room() *room {
+	s.roomOnce.Do(func() { s.huddle = &room{thread: s.ThreadURL} })
+	return s.huddle
+}
 
 // Serve accepts connections until ctx is cancelled or the listener fails.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
@@ -135,6 +153,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}()
 
 	go s.flushLoop(ctx)
+	go s.room().watchAgent(ctx, s.Pane, s.Status, s.StatusInterval)
 
 	if err := hs.Serve(ln); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("live: serve: %w", err)
@@ -240,8 +259,11 @@ func (s *Server) serveGuard() error {
 	if s.Gate == nil {
 		return errors.New("live: a gate is required to serve a stream")
 	}
-	if len(s.Gate.Allowlist) == 0 {
-		return errors.New("live: the share's allowlist is empty, so nobody could join: run `share` first")
+	// An empty allowlist used to be the end of it. It still is when the gate
+	// has no way to say yes to anyone new — but a knocking or open gate makes
+	// an empty list an ordinary starting point (ADR-007).
+	if len(s.Gate.Allowlist) == 0 && !s.Gate.canAdmit() {
+		return errors.New("live: the share's allowlist is empty and the door is closed, so nobody could join: run `share --invite`, or serve with --knock or --open")
 	}
 	if s.Instructor == nil {
 		return errors.New("live: an instructor is required, or a joiner's instructions would vanish silently")
@@ -260,10 +282,11 @@ func (s *Server) serveGuard() error {
 // bare EOF instead of the reason it was dropped.
 //
 // The buffered reader is handed back rather than discarded: it holds whatever
-// the joiner sent after the hello line, and phase 4 will read instructions
-// from it. On the timeout path the reading goroutine is abandoned and unblocks
-// when the connection closes below.
-func (s *Server) authorize(ctx context.Context, conn net.Conn) (string, *bufio.Reader, error) {
+// the joiner sent after the hello line, which is where instructions and
+// resizes arrive. On the timeout path the reading goroutine is abandoned and
+// unblocks when the connection closes below. The hello itself is handed back
+// too, because it carries the size to render this joiner's stream at.
+func (s *Server) authorize(ctx context.Context, conn net.Conn) (string, *bufio.Reader, Frame, error) {
 	timeout := s.GateTimeout
 	if timeout <= 0 {
 		timeout = DefaultGateTimeout
@@ -284,17 +307,17 @@ func (s *Server) authorize(ctx context.Context, conn net.Conn) (string, *bufio.R
 	select {
 	case line = <-got:
 	case <-ctx.Done():
-		return "", nil, ctx.Err()
+		return "", nil, Frame{}, ctx.Err()
 	case <-time.After(timeout):
-		return "", nil, fmt.Errorf("live: no hello from the joiner within %s", timeout)
+		return "", nil, Frame{}, fmt.Errorf("live: no hello from the joiner within %s", timeout)
 	}
 	if line.err != nil {
-		return "", nil, fmt.Errorf("live: no hello from the joiner: %w", line.err)
+		return "", nil, Frame{}, fmt.Errorf("live: no hello from the joiner: %w", line.err)
 	}
 	if line.isPrefix {
-		// A hello is a type and a token; anything longer is not one, and
-		// refusing it beats buffering it.
-		return "", nil, errors.New("live: hello record is too long")
+		// A hello is a type, a token and a size; anything longer is not one,
+		// and refusing it beats buffering it.
+		return "", nil, Frame{}, errors.New("live: hello record is too long")
 	}
 	hello, err := ParseFrame(line.line)
 	if err != nil {
@@ -302,16 +325,19 @@ func (s *Server) authorize(ctx context.Context, conn net.Conn) (string, *bufio.R
 		// token in the clear. The generic message is the whole explanation
 		// this path gets: only our own client sends hellos, and a malformed
 		// one is an attack or a bug, not something to describe back.
-		return "", nil, errors.New("live: the first record was not a valid hello")
+		return "", nil, Frame{}, errors.New("live: the first record was not a valid hello")
 	}
 	if hello.Type != TypeHello {
-		return "", nil, fmt.Errorf("live: first record was %s, want a hello", oneLine([]byte(hello.Type)))
+		return "", nil, Frame{}, fmt.Errorf("live: first record was %s, want a hello", oneLine([]byte(hello.Type)))
 	}
 	login, err := s.Gate.Authorize(ctx, hello.Token)
 	if err != nil {
-		return "", nil, err
+		return "", nil, Frame{}, err
 	}
-	return login, reader, nil
+	// The token has done its work. Blanking it means no later code path can
+	// log, echo or keep it by accident.
+	hello.Token = ""
+	return login, reader, hello, nil
 }
 
 // serve runs one joiner's stream for as long as the joiner is there.
@@ -324,26 +350,33 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	defer cancel()
 	defer conn.Close()
 
-	login, reader, err := s.authorize(ctx, conn)
+	login, reader, hello, err := s.authorize(ctx, conn)
 	if err != nil {
 		s.fail(conn, err)
 		s.logf("joiner %s: %v", conn.RemoteAddr(), err)
 		return
 	}
-	s.logf("joiner %s joined as @%s", conn.RemoteAddr(), login)
 
-	stream, err := s.Observe.Observe(ctx, s.Pane, s.Cols, s.Rows)
-	if err != nil {
-		s.fail(conn, err)
-		return
-	}
-	defer stream.Close()
+	// From here every write to conn goes through the seat, because three
+	// goroutines want to write to it — the frames, the delivery
+	// acknowledgement and the room broadcast — and a socket takes one writer.
+	st := newSeat(login)
+	defer st.close()
+	drained := s.writeSeat(ctx, st, conn)
+
+	view := &viewport{}
+	view.set(clampViewport(hello.Width, hello.Height, s.Cols, s.Rows))
+	s.logf("joiner %s joined as @%s at %dx%d", conn.RemoteAddr(), login, view.cols, view.rows)
+
+	huddle := s.room()
+	huddle.join(st)
+	defer huddle.leave(st)
 
 	// This is the reader for everything a joiner says, and the watcher that
 	// ends their stream when they leave: a read result is either an
-	// instruction or a departure, and a departure must take the observe child
-	// with it — one leaked child per departed joiner, forever, otherwise —
-	// which the cancelled context below prevents.
+	// instruction, a resize or a departure, and a departure must take the
+	// observe child with it — one leaked child per departed joiner, forever,
+	// otherwise — which the cancelled context below prevents.
 	go func() {
 		defer cancel()
 		scanner := bufio.NewScanner(reader)
@@ -356,83 +389,214 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 				s.logf("joiner %s: ignoring a record it could not parse", conn.RemoteAddr())
 				continue
 			}
-			if record.Type != TypeSay {
-				continue
+			switch record.Type {
+			case TypeSay:
+				s.speak(ctx, st, login, record.Text)
+			case TypeResize:
+				view.set(clampViewport(record.Width, record.Height, s.Cols, s.Rows))
 			}
-			s.speak(ctx, conn, login, record.Text)
 		}
 	}()
 
+	s.stream(ctx, st, view)
+
+	// The joiner is owed the records already queued — the closing one above
+	// most of all. Waiting for the writer to drain is what turns "the stream
+	// ended" into something the joiner is told rather than something it has
+	// to infer from a socket closing.
+	st.close()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
+	}
+}
+
+// writeSeat is the one goroutine allowed to write to this connection. The
+// returned channel is shut once it has stopped.
+func (s *Server) writeSeat(ctx context.Context, st *seat, conn net.Conn) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case line := <-st.out:
+				if _, err := conn.Write(line); err != nil {
+					// The joiner left mid-write; closing the seat is what
+					// stops everything else queueing for them.
+					st.close()
+					return
+				}
+			case <-st.closed:
+				// Drain whatever is already queued, then stop. The closing
+				// record is usually the last thing in here.
+				for {
+					select {
+					case line := <-st.out:
+						if _, err := conn.Write(line); err != nil {
+							return
+						}
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+	return done
+}
+
+// viewport is the size this joiner's stream is rendered at, and the lever that
+// restarts it when that changes.
+//
+// A restart is the only mechanism available: `herdr terminal session observe`
+// takes no resize — that is the property ADR-005 relies on for read-only by
+// construction — and a restart is also exactly what a resized terminal wants,
+// because Herdr's first frame is a complete paint (ADR-007).
+type viewport struct {
+	mu         sync.Mutex
+	cols, rows int
+	dirty      bool
+	cancel     context.CancelFunc
+}
+
+func (v *viewport) set(cols, rows int) {
+	v.mu.Lock()
+	if cols == v.cols && rows == v.rows {
+		v.mu.Unlock()
+		return
+	}
+	v.cols, v.rows = cols, rows
+	v.dirty = true
+	cancel := v.cancel
+	v.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// arm records the cancel that a resize will pull, and reports the size the
+// next stream should open at.
+func (v *viewport) arm(cancel context.CancelFunc) (int, int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.cancel = cancel
+	v.dirty = false
+	return v.cols, v.rows
+}
+
+// resized reports whether the stream that just ended was ended by a resize,
+// and disarms.
+func (v *viewport) resized() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.cancel = nil
+	was := v.dirty
+	v.dirty = false
+	return was
+}
+
+// stream observes the pane and forwards its records to the seat, restarting
+// silently whenever the joiner's window changes size.
+func (s *Server) stream(ctx context.Context, st *seat, view *viewport) {
+	for {
+		obsCtx, cancel := context.WithCancel(ctx)
+		cols, rows := view.arm(cancel)
+		ended, err := s.pump(obsCtx, st, cols, rows)
+		cancel()
+
+		if ctx.Err() != nil {
+			return
+		}
+		if view.resized() {
+			// Not an ending: the joiner's terminal changed size and the next
+			// stream opens with a complete paint at the new one.
+			continue
+		}
+		if err != nil {
+			s.failSeat(st, err)
+			s.logf("joiner @%s: %v", st.login, err)
+			return
+		}
+		if !ended {
+			// Herdr normally sends terminal.closed itself; when the stream
+			// simply ends, say so as a record. The verdict has to reach the
+			// joiner as data, because how the connection is torn down
+			// afterwards is not ours to guarantee — and a joiner that must
+			// infer success from a clean close is one race away from
+			// reporting a good stream as a failed one.
+			st.send(ErrorRecordClosed())
+		}
+		return
+	}
+}
+
+// pump runs one observe at one size. It reports whether the stream announced
+// its own end.
+func (s *Server) pump(ctx context.Context, st *seat, cols, rows int) (bool, error) {
+	stream, err := s.Observe.Observe(ctx, s.Pane, cols, rows)
+	if err != nil {
+		return false, err
+	}
+	defer stream.Close()
+
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxRecordBytes)
-	sawClosed := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		frame, err := ParseFrame(line)
 		if err != nil {
 			// The joiner is told, rather than left with a viewport that will
 			// never be repainted correctly.
-			s.fail(conn, err)
-			s.logf("joiner %s: %v", conn.RemoteAddr(), err)
-			return
+			return false, err
 		}
-		if _, err := conn.Write(append(append([]byte(nil), line...), '\n')); err != nil {
-			// The joiner left mid-write; the deferred Close ends its observer.
-			return
+		if !st.send(append(append([]byte(nil), line...), '\n')) {
+			// The joiner left, or fell too far behind to catch up; either way
+			// the deferred Close ends their observer.
+			return true, nil
 		}
 		if frame.Type == TypeClosed {
 			// Worth a line on the operator's side too: a joiner that gets a
 			// blank screen is otherwise unexplained.
 			if frame.Reason != "" {
-				s.logf("joiner %s: %s", conn.RemoteAddr(), frame.Reason)
+				s.logf("joiner @%s: %s", st.login, frame.Reason)
 			}
-			sawClosed = true
-			return
+			return true, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		s.fail(conn, fmt.Errorf("live: read stream: %w", err))
-		s.logf("joiner %s: %v", conn.RemoteAddr(), err)
-		return
+		return false, fmt.Errorf("live: read stream: %w", err)
 	}
-	if err := stream.Wait(); err != nil {
-		s.fail(conn, err)
-		s.logf("joiner %s: %v", conn.RemoteAddr(), err)
-		return
-	}
-	// Herdr normally sends terminal.closed itself; when the stream simply
-	// ends, say so as a record. The verdict has to reach the joiner as data,
-	// because how the connection is torn down afterwards is not ours to
-	// guarantee — and a joiner that must infer success from a clean close is
-	// one race away from reporting a good stream as a failed one.
-	if !sawClosed {
-		if _, err := conn.Write(ErrorRecordClosed()); err != nil {
-			s.logf("joiner %s: could not report the end of the stream: %v", conn.RemoteAddr(), err)
-		}
-	}
+	return false, stream.Wait()
 }
 
-// speak delivers one instruction and reports the outcome to the joiner.
+// speak delivers one instruction and reports the outcome to the room.
 //
 // Order is the whole design: the words go to the agent first and the record
 // follows, so neither the ledger's availability nor its round trip stands
 // between a person and the agent (ADR-005). The record is written only for
 // instructions that were delivered — a comment claiming the agent received
 // something it refused would poison the trace.
-func (s *Server) speak(ctx context.Context, conn net.Conn, login, text string) {
+//
+// The outcome goes to everyone, not only to whoever typed it (ADR-007): two
+// people steering one agent need to see each other do it, and "held: the agent
+// is waiting on its operator" is news for the room, not for one person.
+func (s *Server) speak(ctx context.Context, st *seat, login, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		s.ack(conn, StatusFailed, "the message was empty")
+		st.sendFrame(Frame{Type: TypeSaid, Status: StatusFailed, Reason: "the message was empty", Author: login})
 		return
 	}
 	instruction := thread.Instruction{Author: login, Text: text, URL: s.ThreadURL}
 	if err := s.Instructor.Deliver(ctx, s.Pane, instruction.Prompt()); err != nil {
 		status, reason := deliveryFailure(err)
 		s.logf("instruction from @%s not delivered: %v", login, err)
-		s.ack(conn, status, reason)
+		s.room().broadcast(Frame{Type: TypeSaid, Status: status, Reason: reason, Author: login, Text: text})
 		return
 	}
-	s.ack(conn, StatusSent, "")
+	s.room().broadcast(Frame{Type: TypeSaid, Status: StatusSent, Author: login, Text: text})
 
 	record := thread.LiveInstruction{Author: login, Text: text, At: time.Now()}
 	// Off this goroutine on purpose: "delivery never waits for the record"
@@ -451,20 +615,12 @@ func (s *Server) speak(ctx context.Context, conn net.Conn, login, text string) {
 	}()
 }
 
-// ack reports a say's outcome. Written as its own record — never an error
-// record, which would end the stream over a failed delivery.
-func (s *Server) ack(conn net.Conn, status, reason string) {
-	line, err := json.Marshal(Frame{Type: TypeSaid, Status: status, Reason: reason})
-	if err != nil {
-		return // Frame is a plain struct; this cannot fail
-	}
-	if _, err := conn.Write(append(line, '\n')); err != nil {
-		s.logf("joiner %s: could not report delivery: %v", conn.RemoteAddr(), err)
-	}
-}
+// failSeat tells a joiner why the stream stopped, through their own writer.
+func (s *Server) failSeat(st *seat, err error) { st.send(ErrorRecord(err)) }
 
-// fail tells a joiner why the stream stopped. A failure to write it means the
-// joiner is already gone, which is not worth reporting on top of the reason.
+// fail tells a refused joiner why, before any seat exists. A failure to write
+// it means the joiner is already gone, which is not worth reporting on top of
+// the reason.
 func (s *Server) fail(conn net.Conn, err error) {
 	_, _ = conn.Write(ErrorRecord(err))
 }

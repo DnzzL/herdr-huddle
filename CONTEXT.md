@@ -25,7 +25,15 @@ The set of logins whose comments may be delivered into the agent. The real secur
 _Avoid_: peer, teammate (they imply a separate environment, which is out of scope)
 
 **Stream**:
-The one-way flow of the agent's ANSI frames, from the pane to the joiners. Read-only by construction; the collaborator sends nothing into it.
+The one-way flow of the agent's ANSI frames, from the pane to the joiners. Read-only by construction; the collaborator sends nothing into it. One per joiner, rendered at that joiner's own terminal size.
+
+**Huddle**:
+A share's live half while `serve` is running: the stream, the people in it, and the agent's state, as one thing. The room a joiner is in, as opposed to the pipe they are reading.
+
+**Door**:
+How somebody who is not yet on the allowlist gets in. Three settings and no more: knock (the operator is asked, and their answer is written to the allowlist), open (any proven GitHub identity), closed (the allowlist only). Not a secret, not a code — always a login.
+
+_Avoid_: join code, invite token (they replace a person with a secret, and the thread's attribution is the product)
 
 **Viewer**:
 The role of the client a collaborator runs to join a live share — it renders the stream and sends instructions. Its proof of identity is the collaborator's GitHub token. The command name is `join`, not `watch`: the client has a voice.

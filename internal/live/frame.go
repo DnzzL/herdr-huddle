@@ -32,8 +32,16 @@ const (
 	// Client-to-server only.
 	TypeSay = "say"
 	// TypeSaid reports what became of a say: delivered, held, or failed.
-	// Server-to-client, and never terminal — the stream carries on.
+	// Server-to-client, and never terminal — the stream carries on. It is sent
+	// to the whole room, not only to the author, so two collaborators see each
+	// other steer (ADR-007).
 	TypeSaid = "said"
+	// TypeRoom is who is in the huddle and what the agent is doing.
+	// Server-to-client, sent on arrival and whenever either changes.
+	TypeRoom = "room"
+	// TypeResize asks for the stream to be repainted at a new size.
+	// Client-to-server only; the server restarts that joiner's observe.
+	TypeResize = "resize"
 )
 
 // EncodingANSI is the only payload encoding Herdr sends, and the only one worth
@@ -71,6 +79,22 @@ type Frame struct {
 	// Status is what a said record reports back: one of the Status*
 	// constants. Reason (above) carries why, when it was not simply sent.
 	Status string `json:"status,omitempty"`
+	// Author is the login an echoed say came from. Set on a said record the
+	// server sends; never sent by a client, which would be a claim it cannot
+	// prove — the server attributes from the login the gate established.
+	Author string `json:"author,omitempty"`
+	// Members is the room's roster, on a room record: the logins connected
+	// right now, sorted, one entry per person however many windows they have.
+	Members []string `json:"members,omitempty"`
+	// You is the recipient's own login, on a room record. It is how a joiner
+	// tells itself apart from the rest of the roster without guessing.
+	You string `json:"you,omitempty"`
+	// Agent is the agent's status on a room record — herdr's own vocabulary
+	// (idle, working, blocked, done, unknown), or empty when it cannot be read.
+	Agent string `json:"agent,omitempty"`
+	// Thread is the pull request the share is bound to, on a room record. The
+	// record of the huddle is worth nothing if nobody in it has the link.
+	Thread string `json:"thread,omitempty"`
 }
 
 // ParseFrame decodes one record.
@@ -105,7 +129,7 @@ func ParseFrame(line []byte) (Frame, error) {
 // a client does.
 func (f Frame) Known() bool {
 	switch f.Type {
-	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid:
+	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid, TypeRoom, TypeResize:
 		return true
 	}
 	return false

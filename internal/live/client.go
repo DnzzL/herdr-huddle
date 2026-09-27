@@ -14,13 +14,26 @@ import (
 	"github.com/coder/websocket"
 )
 
-// walk reads records until a terminal one, dispatching each.
+// Events is what a client does with the room it has joined.
 //
-// One loop for both directions of the client keeps frame drawing and delivery
-// feedback honest against the same protocol: an error record ends the stream,
-// a said record is reported without ending it, and a record type from a newer
-// Herdr is skipped rather than mistaken for the end.
-func walk(r io.Reader, onFrame func([]byte) error, onSaid func(Frame)) error {
+// Every field is optional: a renderer that only wants the pane sets Frame, and
+// the TUI sets all three. One loop feeds all of them, which keeps frame
+// drawing, presence and delivery feedback honest against the same protocol —
+// an error record ends the stream, a said record is reported without ending
+// it, and a record type from a newer Herdr is skipped rather than mistaken for
+// the end.
+type Events struct {
+	// Frame is the pane's ANSI bytes, already decoded.
+	Frame func([]byte) error
+	// Room is who is in the huddle and what the agent is doing.
+	Room func(Frame)
+	// Said is the outcome of somebody's instruction — the recipient's own or
+	// another member's, told apart by comparing Author with the room's You.
+	Said func(Frame)
+}
+
+// walk reads records until a terminal one, dispatching each.
+func walk(r io.Reader, e Events) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxRecordBytes)
 	for scanner.Scan() {
@@ -39,7 +52,10 @@ func walk(r io.Reader, onFrame func([]byte) error, onSaid func(Frame)) error {
 			if err != nil {
 				return err
 			}
-			if err := onFrame(data); err != nil {
+			if e.Frame == nil {
+				continue
+			}
+			if err := e.Frame(data); err != nil {
 				return fmt.Errorf("live: draw frame: %w", err)
 			}
 		case TypeError:
@@ -56,8 +72,12 @@ func walk(r io.Reader, onFrame func([]byte) error, onSaid func(Frame)) error {
 			}
 			return nil
 		case TypeSaid:
-			if onSaid != nil {
-				onSaid(frame)
+			if e.Said != nil {
+				e.Said(frame)
+			}
+		case TypeRoom:
+			if e.Room != nil {
+				e.Room(frame)
 			}
 		}
 	}
@@ -71,14 +91,13 @@ func walk(r io.Reader, onFrame func([]byte) error, onSaid func(Frame)) error {
 //
 // It writes the frame payloads and nothing else: the stream is ANSI, the
 // terminal is a terminal, and anything added here would be drawn into the
-// viewport the frame is trying to paint.
+// viewport the frame is trying to paint. Chrome belongs to the TUI, which
+// composites rather than interleaves (ADR-007).
 func Render(stream io.Reader, out io.Writer) error {
-	return walk(stream, func(data []byte) error {
-		if _, err := out.Write(data); err != nil {
-			return err
-		}
-		return nil
-	}, nil)
+	return walk(stream, Events{Frame: func(data []byte) error {
+		_, err := out.Write(data)
+		return err
+	}})
 }
 
 // Session is a joiner's side of a live share: frames out, instructions in.
@@ -87,13 +106,22 @@ type Session struct {
 	reader *bufio.Reader
 }
 
+// Option tunes a dial.
+type Option func(*Frame)
+
+// WithViewport asks for the stream to be rendered at the joiner's own size.
+// Without it the server serves the size it was started with (ADR-007).
+func WithViewport(cols, rows int) Option {
+	return func(hello *Frame) { hello.Width, hello.Height = cols, rows }
+}
+
 // Dial connects, presents the token as the first record, and returns once the
 // server's hello read has had its chance to refuse.
 //
 // Presenting before reading is the whole protocol: the server observes
 // nothing until the gate has approved, so there is no window in which frames
 // are sent to someone unapproved (ADR-006).
-func Dial(ctx context.Context, endpoint, token string) (*Session, error) {
+func Dial(ctx context.Context, endpoint, token string, opts ...Option) (*Session, error) {
 	u, err := wsEndpoint(endpoint)
 	if err != nil {
 		return nil, err
@@ -110,7 +138,11 @@ func Dial(ctx context.Context, endpoint, token string) (*Session, error) {
 	}
 	stream := websocket.NetConn(ctx, conn, websocket.MessageBinary)
 
-	hello, err := json.Marshal(Frame{Type: TypeHello, Token: token})
+	frame := Frame{Type: TypeHello, Token: token}
+	for _, opt := range opts {
+		opt(&frame)
+	}
+	hello, err := json.Marshal(frame)
 	if err != nil {
 		_ = stream.Close()
 		return nil, fmt.Errorf("live: build hello: %w", err)
@@ -122,59 +154,79 @@ func Dial(ctx context.Context, endpoint, token string) (*Session, error) {
 	return &Session{conn: stream, reader: bufio.NewReader(stream)}, nil
 }
 
-// Say sends one instruction. It does not wait for the outcome: Draw reports
-// that, on the same connection.
+// Say sends one instruction. It does not wait for the outcome: the room
+// reports that, on the same connection.
 func (s *Session) Say(text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("live: nothing to send")
 	}
-	line, err := json.Marshal(Frame{Type: TypeSay, Text: text})
-	if err != nil {
-		return fmt.Errorf("live: build instruction: %w", err) // cannot fail
-	}
-	if _, err := s.conn.Write(append(line, '\n')); err != nil {
+	if err := s.write(Frame{Type: TypeSay, Text: text}); err != nil {
 		return fmt.Errorf("live: could not send the instruction: %w", err)
 	}
 	return nil
 }
 
-// Draw renders frames to out and delivery outcomes to feedback, until the
-// stream ends. Both writers may be the same stream; out gets ANSI and feedback
-// gets plain lines, so typically stdout and stderr.
-func (s *Session) Draw(out, feedback io.Writer) error {
-	return walk(s.reader, func(data []byte) error {
-		if _, err := out.Write(data); err != nil {
-			return err
-		}
+// Resize asks for the stream to be repainted at a new size. The server
+// restarts this joiner's observer, so the next frame is a complete paint.
+func (s *Session) Resize(cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
 		return nil
-	}, func(frame Frame) {
-		if feedback == nil {
-			return
-		}
-		fmt.Fprintln(feedback, "herdr-huddle: "+saidLine(frame))
+	}
+	return s.write(Frame{Type: TypeResize, Width: cols, Height: rows})
+}
+
+func (s *Session) write(f Frame) error {
+	line, err := json.Marshal(f)
+	if err != nil {
+		return err // Frame is a plain struct; this cannot fail.
+	}
+	_, err = s.conn.Write(append(line, '\n'))
+	return err
+}
+
+// Run reads the stream and dispatches it, until the stream ends.
+func (s *Session) Run(e Events) error { return walk(s.reader, e) }
+
+// Draw renders frames to out and room events to feedback, until the stream
+// ends. It is the fallback for a client with no terminal to composite onto;
+// the TUI uses Run.
+func (s *Session) Draw(out, feedback io.Writer) error {
+	return s.Run(Events{
+		Frame: func(data []byte) error {
+			_, err := out.Write(data)
+			return err
+		},
+		Said: func(frame Frame) {
+			if feedback == nil {
+				return
+			}
+			fmt.Fprintln(feedback, "herdr-huddle: "+SaidLine(frame))
+		},
 	})
 }
 
 // Close ends the session.
-func (s *Session) Close() error {
-	return s.conn.Close()
-}
+func (s *Session) Close() error { return s.conn.Close() }
 
-// saidLine words a delivery outcome for the person who typed it.
-func saidLine(f Frame) string {
+// SaidLine words a delivery outcome for the room to read.
+func SaidLine(f Frame) string {
+	who := ""
+	if f.Author != "" {
+		who = "@" + f.Author + ": "
+	}
 	switch f.Status {
 	case StatusSent:
-		return "delivered to the agent"
+		return who + "delivered to the agent"
 	case StatusHeld:
-		return "held: " + f.Reason
+		return who + "held: " + f.Reason
 	case StatusFailed:
-		return "not delivered: " + f.Reason
+		return who + "not delivered: " + f.Reason
 	default:
 		if f.Reason != "" {
-			return f.Status + ": " + f.Reason
+			return who + f.Status + ": " + f.Reason
 		}
-		return f.Status
+		return who + f.Status
 	}
 }
 

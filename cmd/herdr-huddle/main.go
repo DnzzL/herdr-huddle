@@ -26,6 +26,7 @@ import (
 	"github.com/DnzzL/herdr-huddle/internal/session"
 	"github.com/DnzzL/herdr-huddle/internal/share"
 	"github.com/DnzzL/herdr-huddle/internal/thread"
+	"github.com/DnzzL/herdr-huddle/internal/tui"
 )
 
 // clientID is the OAuth App client id, injected at build time:
@@ -104,8 +105,8 @@ Usage:
   herdr-huddle auth logout
   herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
   herdr-huddle poll [--once] [--interval 10s]
-  herdr-huddle serve [--pane id] [--addr 127.0.0.1:8787] [--cols n] [--rows n]
-  herdr-huddle join [--addr 127.0.0.1:8787]
+  herdr-huddle serve [--pane id] [--open | --closed] [--no-tunnel] [--addr host:port]
+  herdr-huddle join [address] [--addr 127.0.0.1:8787]
 
 Auth:
   login    Authorize with GitHub via the device flow and store the token.
@@ -135,37 +136,45 @@ Poll:
            --interval  how often to look, default 10s.
 
 Serve and join:
-  serve    Stream a share's agent pane to whoever the gate lets in. The pane
-           and the allowlist come from the same active share, because the
-           allowlist is what gates the endpoint; --pane picks the share when
-           several are active. Every joiner gets its own read-only stream of
-           the pane, freshly painted from the top, and is checked against the
-           allowlist before a single frame is observed. Nothing is written to
-           the pane; the way to steer the agent is still a comment on the
-           thread.
+  serve    Open the huddle: stream a share's agent pane to whoever gets in,
+           and deliver what they type to the agent. The pane and the allowlist
+           come from the same active share; --pane picks the share when several
+           are active. Every joiner gets its own read-only stream of the pane,
+           rendered at their own terminal's size and freshly painted from the
+           top, and is checked before a single frame is observed. Nothing is
+           ever written to the pane itself.
            --addr        where to listen; loopback by default.
            --pane        which pane to stream.
-           --cols, --rows  the viewport the stream is rendered at.
+           --cols, --rows  what a joiner gets when it does not report its own
+                         window size.
            --no-tunnel   do not start a tunnel; serve on this address only.
-           Unless --no-tunnel is given, serve starts a quick tunnel (it needs
-           cloudflared installed) and prints the one line to send. Without
-           cloudflared it says so and serves locally instead. It also delivers
-           what joiners type straight to the agent, then records each
-           delivered instruction on the thread — the record is queued and
-           retried if GitHub is unreachable, and delivery never waits for it.
-  join     Join a live share: draw the stream in this terminal, and type a
-           line to send it to the agent.
+           --open        let anyone with the link and a GitHub identity in,
+                         without asking. The link becomes the invitation.
+           --closed      the allowlist or nothing, and nobody is asked — for a
+                         serve nobody is sitting in front of.
+           By default the door knocks: somebody who is not on the allowlist
+           yet proves who they are on GitHub, you are asked here, and one
+           keypress lets them in for good — their pull-request comments
+           included. Unless --no-tunnel is given, serve starts a quick tunnel
+           (it needs cloudflared installed) and prints the one line to send.
+           Every delivered instruction is recorded on the thread; the record is
+           queued and retried if GitHub is unreachable, and delivery never
+           waits for it.
+  join     Join a huddle and see it as a room: the agent's pane above, who
+           else is here and what the agent is doing below, and a line to type
+           into.
              herdr-huddle join <address>      the line serve printed
            --addr        the share to join when no address is given.
            Presents the stored GitHub token, or runs GitHub's device flow in a
-           browser when there is none, and is refused without the share's
-           allowlist. What you type is delivered to the agent immediately and
-           recorded on the thread afterwards; a held or failed delivery is
-           reported here rather than silently dropped.
+           browser when there is none. What you type is delivered to the agent
+           immediately and recorded on the thread afterwards; a held or failed
+           delivery is reported in the room rather than silently dropped.
+           Ctrl-C leaves. Piped somewhere that is not a terminal, it writes the
+           pane's bytes out plainly instead.
 
-A share is the whole of it: share opens the thread, serve streams its agent
-live, and join is the other person's window into it. The writes to GitHub are
-still made by poll.
+A share is the whole of it: share opens the thread, serve opens the huddle on
+it, and join is everyone else's window in. The pull request is the artifact the
+huddle leaves behind. The writes to GitHub are still made by poll.
 `)
 }
 
@@ -448,14 +457,19 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", defaultLiveAddr, "where to listen for joiners")
 	pane := fs.String("pane", "", "the pane to stream (default: the pane the active share is bound to)")
-	cols := fs.Int("cols", live.DefaultCols, "the width the stream is rendered at")
-	rows := fs.Int("rows", live.DefaultRows, "the height the stream is rendered at")
+	cols := fs.Int("cols", live.DefaultCols, "the width a joiner gets when it does not report its own")
+	rows := fs.Int("rows", live.DefaultRows, "the height a joiner gets when it does not report its own")
 	noTunnel := fs.Bool("no-tunnel", false, "do not start a tunnel; serve on this address only")
+	open := fs.Bool("open", false, "let anyone with a GitHub identity in, without asking")
+	closed := fs.Bool("closed", false, "the allowlist or nothing: never ask, never knock")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("%w: `serve` takes no positional arguments, got %q", errUsage, fs.Arg(0))
+	}
+	if *open && *closed {
+		return fmt.Errorf("%w: --open and --closed are opposite doors; pass at most one", errUsage)
 	}
 
 	state, err := shareForServe(shareStore(), *pane)
@@ -471,21 +485,26 @@ func runServe(args []string) error {
 		return fmt.Errorf("could not listen on %s: %w", *addr, err)
 	}
 
-	server := &live.Server{
-		Pane:       state.Origin.PaneID,
-		Cols:       *cols,
-		Rows:       *rows,
-		Observe:    &live.HerdrObserver{},
-		Gate:       &live.Gate{Verify: live.GitHubVerifier{}, Allowlist: state.Allowlist},
-		Instructor: live.HerdrInstructor{},
-		Ledger:     threadLedger(ctx, state),
-		ThreadURL:  state.URL,
-		Log: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
-		},
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
 	}
-	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s for %s (%dx%d)\n",
-		state.Origin.PaneID, state.Repo, *cols, *rows)
+
+	server := &live.Server{
+		Pane:           state.Origin.PaneID,
+		Cols:           *cols,
+		Rows:           *rows,
+		Observe:        &live.HerdrObserver{},
+		Gate:           doorFor(shareStore(), state, *open, *closed, logf),
+		Instructor:     live.HerdrInstructor{},
+		Ledger:         threadLedger(ctx, state),
+		ThreadURL:      state.URL,
+		Status:         live.HerdrStatuser{},
+		StatusInterval: live.DefaultStatusInterval,
+		Log:            logf,
+	}
+	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s for %s — the record is %s\n",
+		state.Origin.PaneID, state.Repo, state.URL)
+	fmt.Fprintf(os.Stderr, "herdr-huddle: the door is %s\n", doorLabel(*open, *closed))
 
 	switch {
 	case *noTunnel:
@@ -528,6 +547,87 @@ func threadLedger(ctx context.Context, state share.State) *thread.InstructionLed
 		Owner:  owner,
 		Repo:   name,
 		Number: state.Number,
+	}
+}
+
+// doorFor builds the gate ADR-007 describes: the allowlist, plus a way to say
+// yes to somebody who is not on it yet.
+//
+// Knocking is the default because it is the only arrangement that is both
+// frictionless for the guest — the link is the whole invitation — and an
+// actual decision by the operator, taken with the asker's proven login in
+// front of them. --open trades the decision for convenience; --closed keeps
+// today's behaviour for an unattended serve.
+func doorFor(store share.Store, state share.State, open, closed bool, logf func(string, ...any)) *live.Gate {
+	gate := &live.Gate{
+		Verify:    live.GitHubVerifier{},
+		Allowlist: state.Allowlist,
+		Open:      open,
+		Remember:  rememberJoiner(store, state.Key()),
+		Log:       logf,
+	}
+	if !open && !closed {
+		gate.Admit = &terminalApprover{in: bufio.NewReader(os.Stdin), out: os.Stderr}
+	}
+	return gate
+}
+
+func doorLabel(open, closed bool) string {
+	switch {
+	case open:
+		return "open: anyone with the link and a GitHub identity is let in"
+	case closed:
+		return "closed: only the share's allowlist, and nobody is asked"
+	default:
+		return "knock: somebody new asks here, and you answer"
+	}
+}
+
+// terminalApprover is the operator answering their own door.
+//
+// It reads the operator's terminal, which is the one place their answer can be
+// trusted to come from. A stdin that is closed or not a terminal — an
+// unattended serve — returns an error, and the gate turns that into a refusal:
+// nobody is let in because nobody could be asked.
+type terminalApprover struct {
+	in  *bufio.Reader
+	out io.Writer
+}
+
+func (t *terminalApprover) Approve(_ context.Context, login string) (bool, error) {
+	fmt.Fprintf(t.out, "\nherdr-huddle: @%s is at the door (github.com/%s).\n  let them into the huddle? [y/N] ", login, login)
+	line, err := t.in.ReadString('\n')
+	if err != nil {
+		if strings.TrimSpace(line) == "" {
+			return false, fmt.Errorf("nothing to read the answer from: %w", err)
+		}
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
+}
+
+// rememberJoiner writes an admitted login onto the share, so the poller
+// delivers their pull-request comments too. One list, two doors (ADR-005).
+func rememberJoiner(store share.Store, key string) func(string) error {
+	return func(login string) error {
+		states, err := store.Load()
+		if err != nil {
+			return err
+		}
+		for _, state := range states {
+			if state.Key() != key {
+				continue
+			}
+			for _, allowed := range state.Allowlist {
+				if strings.EqualFold(allowed, login) {
+					return nil
+				}
+			}
+			state.Allowlist = append(state.Allowlist, login)
+			state.UpdatedAt = time.Now()
+			return store.Put(state)
+		}
+		return fmt.Errorf("share %s is no longer recorded", key)
 	}
 }
 
@@ -587,11 +687,13 @@ func shareForServe(store share.Store, pane string) (share.State, error) {
 	}
 }
 
-// runJoin joins a live share: present who you are, then draw what the pane
-// shows, until it ends or Ctrl-C.
+// runJoin joins a live share: present who you are, then draw the room until
+// it ends or Ctrl-C.
 //
-// Phase 2 is one-way: the joiner sends only the hello, and the way to steer
-// the agent is still a comment on the thread (ADR-005).
+// On a terminal that is a terminal, this is the TUI — the pane on top, the
+// room below it, and a line to type into (ADR-007). Piped somewhere, it falls
+// back to writing the pane's bytes out unadorned, which is the only honest
+// thing to do with chrome that has nothing to composite onto.
 func runJoin(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
 	addr := fs.String("addr", defaultLiveAddr, "the share to join when no address is given")
@@ -614,18 +716,39 @@ func runJoin(args []string) error {
 		return err
 	}
 
-	session, err := live.Dial(ctx, endpoint, token)
+	// The viewport is asked for before the first frame, because the server
+	// starts this joiner's observer at whatever size the hello carried
+	// (ADR-007). Getting it afterwards would cost a restart on arrival.
+	var opts []live.Option
+	interactive := tui.IsTerminal(os.Stdout) && tui.IsTerminal(os.Stdin)
+	if interactive {
+		cols, rows := tui.Size(os.Stdout)
+		opts = append(opts, live.WithViewport(cols, tui.PaneRows(rows)))
+	}
+
+	session, err := live.Dial(ctx, endpoint, token, opts...)
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 
-	fmt.Fprintf(os.Stderr, "herdr-huddle: joined %s (Ctrl-C to leave)\n", endpoint)
-	fmt.Fprintf(os.Stderr, "herdr-huddle: type a line and press enter to send it to the agent\n")
+	if !interactive {
+		fmt.Fprintf(os.Stderr, "herdr-huddle: joined %s (Ctrl-C to leave)\n", endpoint)
+		return joinPlainly(ctx, session)
+	}
 
-	// Two directions, two loops: frames are drawn as they arrive while stdin
-	// stays live for instructions, so the agent's next words and the
-	// collaborator's next words never queue behind each other.
+	app := &tui.App{
+		In:   os.Stdin,
+		Out:  os.Stdout,
+		Hint: "type a line and press enter to send it to the agent · Ctrl-C to leave",
+	}
+	return app.Run(ctx, session)
+}
+
+// joinPlainly is the fallback for a join whose output is not a terminal: the
+// pane's bytes to stdout, everything the room says to stderr, and lines from
+// stdin as instructions.
+func joinPlainly(ctx context.Context, session *live.Session) error {
 	drawDone := make(chan error, 1)
 	go func() { drawDone <- session.Draw(os.Stdout, os.Stderr) }()
 
