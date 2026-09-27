@@ -308,3 +308,14 @@ Every decision, with the alternatives it rejected, is in
 | [007](docs/adr/ADR-007-the-huddle-room.md) | The stream becomes a room: knock to join, a viewport each |
 
 The vocabulary this is all written in is in [`CONTEXT.md`](CONTEXT.md).
+
+## Licence
+
+[Apache License 2.0](LICENSE) — permissive, with an express patent grant.
+
+Herdr itself is not a dependency of this repository in the licensing sense:
+every call into it is a subprocess (`herdr agent prompt`, `herdr terminal
+session observe`), not a link. The Go dependencies are
+[coder/websocket](https://github.com/coder/websocket) (ISC) and
+`golang.org/x/term` and `golang.org/x/sys` (BSD-3-Clause), all of which are
+compatible with this licence.
