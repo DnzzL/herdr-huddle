@@ -1,104 +1,96 @@
 # herdr-huddle
 
-Open your agent's terminal to other people, and leave a pull request behind as
-the record.
+**Open your agent's terminal to other people. Leave a pull request behind as the
+record.**
 
-You run an agent in a Herdr pane. You open a share — a branch, an empty commit
-and a draft PR — and then a huddle: one link, sent to whoever you want in. They
-run one binary, see the agent working in their own terminal at their own size,
-see who else is in the room, and type to steer it. Everything they say reaches
-the agent immediately and lands on the pull request afterwards, attributed.
+```
+ pi · ~/Projects/demo
+   ▸ Read internal/live/server.go
+   ▸ Edit internal/live/server.go
+   ● Thinking…
 
-The pull request is the artifact: the agent's turns arrive as comments, so does
+── huddle ─────────────────────────────────────────────────── acme/demo#13 ──
+● working   you and @thomas
+@thomas: delivered to the agent
+› also update the README▏
+```
+
+You run a coding agent in a Herdr pane. `herdr-huddle` turns it into a room: one
+link, sent to whoever you want in. They run one binary and watch the agent work —
+live, in their own terminal, at their own size — and type to steer it. Every
+instruction reaches the agent immediately and lands on a pull request afterwards,
+attributed.
+
+The pull request is the artifact. The agent's turns arrive as comments, so does
 every instruction anyone gave live, and a comment beginning with `/agent` steers
 the agent even from people who never open a terminal. The agent stays in your
 terminal, under your control, and nothing is ever typed into your pane.
 
-The design is settled in [`docs/adr/`](docs/adr/) — read ADR-001 first.
+## How it works
 
-## What it needs
+| Command | What it opens |
+|---------|---------------|
+| `share` | The **thread** — a branch, an empty commit, a draft pull request. |
+| `serve` | The **huddle** — a link to send, and the door you answer. |
+| `join`  | Everyone else's **way in** — the pane, the room, and a line to type. |
 
-- Herdr 0.9.0 or newer, on Linux or macOS.
-- Go 1.26+ to build it.
-- A GitHub **OAuth App** you create yourself (below). One per user, not one per
-  share.
-- An agent running in a Herdr pane that the share is opened from. `pi` and
-  Claude Code have a transcript adapter; any other agent works, and its
-  transcript comes from the pane's terminal and is labelled as such.
+`share` and `poll` keep the pull request in step with the agent on their own.
+`serve` and `join` are the live half, and they are optional: the thread works
+without them.
 
-## Set it up
+## Quickstart
 
-1. **Create an OAuth App.** GitHub → Settings → Developer settings → OAuth Apps →
-   New OAuth App. Any name and homepage URL; the callback URL is unused but must
-   be filled in (say `https://github.com`). **Tick "Enable Device Flow".** Copy
-   the client id — it looks like `Iv1.0123456789abcdef`.
+**You need** Herdr 0.9.0+ on Linux or macOS, Go 1.26+ to build, and an agent
+running in a Herdr pane. `pi` and Claude Code have a transcript adapter; any
+other agent works, with its transcript read from the pane's terminal and
+labelled as such.
 
-   The client id is not a secret. The device flow was chosen precisely so that no
-   client secret exists and nothing has to be hosted.
+**1. Create a GitHub OAuth App.** Settings → Developer settings → OAuth Apps →
+New OAuth App. Any name and homepage URL; the callback URL is unused but must be
+filled in (say `https://github.com`). **Tick "Enable Device Flow"** and copy the
+client id — it looks like `Iv1.0123456789abcdef`.
 
-2. **Build it with that client id.**
+> The client id is not a secret. The device flow was chosen precisely so that no
+> client secret exists and nothing has to be hosted.
 
-   ```
-   make build CLIENT_ID=Iv1.0123456789abcdef
-   ```
+**2. Build it with that client id.**
 
-3. **Link the plugin.** This registers it with Herdr and starts the poller on the
-   next server start. `make install` prints the command rather than running it,
-   because registering a plugin is a change to your Herdr, not to this repository.
+```
+make build CLIENT_ID=Iv1.0123456789abcdef
+```
 
-   ```
-   herdr plugin link /path/to/herdr-huddle
-   ```
+**3. Link the plugin**, which registers it with Herdr and starts the poller on
+the next server start:
 
-4. **Authorize.**
+```
+herdr plugin link /path/to/herdr-huddle
+```
 
-   ```
-   ./bin/herdr-huddle auth login --repo owner/name
-   ```
+`make install` prints this command rather than running it: registering a plugin
+is a change to your Herdr, not to this repository.
 
-   It prints a code and a URL. Open the URL, type the code. The token goes in the
-   OS keychain, and is scoped to the narrowest thing that works: `public_repo` for
-   a public repository, `repo` for a private one. `GH_TOKEN` and `GITHUB_TOKEN`
-   are honoured first if you already have one.
+**4. Authorize.**
 
-5. **Open a share from inside the pane** whose agent you want to share:
+```
+./bin/herdr-huddle auth login --repo owner/name
+```
 
-   ```
-   ./bin/herdr-huddle share --invite @collaborator
-   ```
+It prints a code and a URL. Open the URL, type the code. The token goes in the OS
+keychain, scoped to the narrowest thing that works: `public_repo` for a public
+repository, `repo` for a private one. `GH_TOKEN` and `GITHUB_TOKEN` are honoured
+first if you already have one.
 
-   `--invite` is optional. It gives that user read access to the repository and
-   puts them on the allowlist ahead of time — useful for someone whose `/agent`
-   comments should work before they ever join live. To open the huddle itself
-   you do not need it: whoever holds the link knocks, and you let them in.
+**5. Open a share from inside the pane** whose agent you want to share:
 
-## What the two of you see
+```
+./bin/herdr-huddle share
+```
 
-- **Your collaborator installs nothing to follow the thread.** No Herdr, no
-  herdr-huddle, no token: the thread is a normal pull request, and the URL is
-  the whole invitation. On a private repository they still need read access to
-  comment at all — see the limits below. Watching the agent *live* is the one
-  thing that does need a client; that is `herdr-huddle join`.
-- **The pull request body** is a header, written once when the share opens. It
-  says what the thread is and what the `/agent` rules are.
-- **The transcript** arrives as comments, one per completed agent turn, each
-  marked as this tool's own output. Nothing is posted while the agent is still
-  working.
-- **Instructions** are comments that start with `/agent`. They are delivered to
-  the agent tagged as third-party input carrying the author's login, so the agent
-  has no reason to treat them as coming from you.
-- **The only acknowledgement is a 👀 reaction**, added when your instruction is
-  held back because the agent is busy. A refused one gets nothing: the reason
-  (`not on the allowlist`, `does not start with /agent`) goes to the operator's
-  log and nowhere public. Silence means "check with whoever runs the poller".
-- **The diff is empty** until *you* commit. Uncommitted work is deliberately not
-  mirrored: a diff that changes under a reviewer without a commit is a lie.
+That is the thread. `--invite @user` is optional — it gives someone repository
+read access and puts them on the allowlist ahead of time, which is useful for a
+person whose `/agent` comments should work before they ever join live.
 
-### Open the huddle
-
-`herdr-huddle serve` opens the room; `herdr-huddle join` is everyone else's way
-in. It is the difference between reading what the agent already said and being in
-the room while it says it.
+## Open the huddle
 
 ```
 # on your machine, in the pane's project
@@ -112,14 +104,15 @@ the room while it says it.
 herdr-huddle join https://k3f9x1.trycloudflare.com
 ```
 
-`serve` starts a quick tunnel itself and prints the one line to send (it needs
-`cloudflared` on your machine; without it, it says so and serves this machine
-only — `--no-tunnel` forces that). The collaborator installs nothing: no Herdr,
-no tunnel client, no account.
+`serve` starts a [quick tunnel](docs/adr/ADR-006-quick-tunnel-door.md) itself and
+prints the one line to send. It needs `cloudflared` on your machine; without it
+it says so and serves this machine only, which `--no-tunnel` forces. The
+collaborator installs nothing else: no Herdr, no tunnel client, no account.
 
-**The link is the invitation.** When somebody who is not on the allowlist yet
-turns up, they prove who they are on GitHub and you are asked, on your own
-terminal:
+### The link is the invitation
+
+Somebody who is not on the allowlist yet proves who they are on GitHub, and you
+are asked on your own terminal:
 
 ```
 herdr-huddle: @collaborator is at the door (github.com/collaborator).
@@ -129,128 +122,60 @@ herdr-huddle: @collaborator is at the door (github.com/collaborator).
 
 One `y` and they are in for good: the login goes onto the share's allowlist, so
 their pull-request comments start being delivered too, and a reconnect does not
-ask you again. `--open` skips the question — anyone with the link and a GitHub
-identity is in, for as long as `serve` runs, and nothing is written to the
-allowlist, because being open for one huddle is not the same as trusting
-someone's comments from now on. `--closed` never asks (the allowlist or
-nothing), for a `serve` nobody is sitting in front of.
+ask you again.
 
-What the joiner sees is a room, not a pipe:
+This happens **before a single frame is observed**. A refused joiner is told why
+(`@x was not let into this share`, `401: Bad credentials`) and sees nothing at
+all — no pane, no partial paint, and no `observe` process ever started for them.
 
-```
- pi · ~/Projects/demo                                                     [agent's pane]
-   ▸ Read internal/live/server.go
-   ▸ Edit internal/live/server.go
-   …
+| Door | Behaviour |
+|------|-----------|
+| **knock** *(default)* | You are asked. A `y` is written to the allowlist and outlives the session. |
+| `--open` | Anyone with the link and a GitHub identity is in, for as long as `serve` runs. Nothing is written. |
+| `--closed` | The allowlist or nothing, and nobody is asked — for a `serve` nobody is sitting in front of. |
 
-── huddle ────────────────────────────────────────────────── acme/demo#13 ──
-● working   you and @ana
-@ana: delivered to the agent
-› make the gate refuse an expired token▏
-```
+### What the joiner gets
 
-- **Everyone proves who they are before a single frame is observed.** The client
-  presents a GitHub token — the stored one, or GitHub's device flow in a browser
-  if there is none — and the gate resolves it to a login first. A refused joiner
-  is told why (`@x was not let into this share`, `401: Bad credentials`) and sees
-  nothing at all.
-- **Each joiner gets their own read-only stream**, rendered at *their* terminal's
-  size and freshly painted from the top, so someone arriving late sees a whole
-  screen rather than the tail of one. Resizing the window repaints it; several
-  people can be in at once, each at their own size.
-- **The room knows what the agent is doing.** `working`, `idle`, or `waiting on
-  the operator` — the one thing a silent pane cannot tell you.
-- **Type a line and it reaches the agent.** It is delivered immediately — wrapped
-  as a colleague's unverified message carrying your login, exactly the treatment
-  `/agent` comments get — echoed to everyone else in the room, and recorded on the
-  pull request afterwards. A held delivery (the agent is waiting for its operator)
-  or a failed one is reported to the room; nothing is silently dropped.
-- **Leaving is Ctrl-C.** It ends your stream and the observer behind it, the room
+- **Their own stream**, rendered at *their* terminal's size and freshly painted
+  from the top, so someone arriving late sees a whole screen rather than the tail
+  of one. Resizing repaints it. Several people can be in at once, each at their
+  own size.
+- **The room**: who else is here, and what the agent is doing — `working`,
+  `idle`, or `waiting on the operator`. That last one is the thing a silent pane
+  cannot tell you.
+- **A line to type.** It reaches the agent immediately, wrapped as a colleague's
+  unverified message carrying their login, echoed to everyone else in the room,
+  and recorded on the pull request afterwards. A held or failed delivery is
+  reported to the room; nothing is silently dropped.
+- **Ctrl-C to leave.** It ends their stream and the observer behind it, the room
   is told, and nothing else changes.
 
-If the pane is gone, the joiner is told why (`terminal target w16:p1 not found`)
-rather than left with a blank screen. Piped somewhere that is not a terminal,
-`join` writes the pane's bytes out plainly instead of drawing a room.
+Keystrokes never reach your terminal: the stream runs `herdr terminal session
+observe`, which takes no input, no resize and no takeover. A joiner sends the
+agent sentences, not keypresses, and cannot answer a permission prompt.
 
-## The limits worth knowing before you rely on it
+Piped somewhere that is not a terminal, `join` writes the pane's bytes out
+plainly instead of drawing a room.
 
-- **On a private repository, your collaborator needs at least read access to
-  comment at all.** `--invite` asks for it (`permission: pull`). On a work org
-  where you are not an admin, that request will fail — the share says so and
-  carries on, and you have to get access granted another way. This is a hard
-  GitHub limit, not something this tool can work around.
-- **The permission gate is never delegated.** When the agent stops for approval,
-  only you can answer it, at your terminal. Herdr refuses a prompt to a blocked
-  agent outright, and this tool does not try. It posts a comment saying the agent
-  is waiting, so your collaborator is not left guessing.
-- **Everything posted into the pull request is secret-scanned first**, but the
-  scan is a pattern match, not a guarantee. The local session file is the
-  authoritative record; the pull request is a projection of it.
-- **`/agent` text is untrusted input.** The prompt that carries it says so, and
-  carries the author's login. That is a defence, not a sandbox: an agent that
-  obeys a comment can still do anything you could do.
-- **The endpoint is public while `serve` runs, and the door is the whole gate.**
-  `serve` still listens on `127.0.0.1`, but by default puts a Cloudflare quick
-  tunnel in front of it — and a quick tunnel cannot have Cloudflare Access in
-  front either (it needs a zone of yours). So GitHub pairing — a token presented
-  first, resolved to a login, and then either on the allowlist or admitted by
-  you — is the *only* thing between that URL and your pane: no rate limit, no
-  second factor. Refusals are logged on your side and reported to the joiner.
-  `--no-tunnel` removes the exposure entirely. The token itself only ever
-  travels over `wss://` or loopback; the client refuses a cleartext address.
-- **`--open` makes the link the entire boundary.** It is the Live Share posture
-  and it is a real trade: anyone who can see the URL and has any GitHub account
-  is in, with no human in the loop. That is why it is a flag and not the
-  default. It does not outlive the `serve` that granted it.
-- **Answering `y` is not reversible from here.** That admission *is* written to
-  the share record, which is the point — it also makes their `/agent` comments
-  deliverable. Taking it back means editing `shares.json`; the poller picks the
-  change up on its next pass.
-- **A dead token refuses cleanly.** If GitHub no longer accepts the stored
-  token, the gate says `GitHub could not confirm the token` and shows nothing;
-  run `herdr-huddle auth login` again. (The same dead token stops `poll` from
-  posting, so the two fail together.)
-- **The token the collaborator pairs with is not saved** — it is used to prove
-  who they are for that session only, and never replaces your repo-scoped one.
-- **The pane stays read-only by construction; the steering path does not.**
-  The stream runs `herdr terminal session observe`, which takes no input, no
-  resize and no takeover, so no code path can write to the pane itself. What a
-  joiner types goes to the agent's prompt instead — allowlist-gated, attributed,
-  wrapped as third-party input — through the same door the poller uses for
-  `/agent` comments. Typing into the pane directly stays discouraged: the agent
-  would record it as the operator's own words.
-- **The record trails delivery, by design.** Every delivered instruction is
-  posted to the thread as a comment opening with this tool's marker, so the
-  poller recognises it as ours and never delivers it a second time; it
-  attributes its author and says it arrived live. GitHub's issue-comment API has
-  no reply threading, so the record attributes the turn rather than nesting it.
-  If GitHub is unreachable, records queue (up to 100) and are retried while
-  `serve` runs — delivery never waits for them — and anything still queued at
-  shutdown is logged, not hidden.
-- **A resize costs a fresh stream.** `observe` takes no resize — that is what
-  makes it read-only by construction — so a joiner whose window changes gets a
-  restarted observer and a complete repaint. Dragging a window edge restarts it
-  repeatedly. `--cols`/`--rows` are now only the fallback for a client that
-  cannot measure itself.
-- **The joiner's TUI does not emulate a terminal.** It reserves the bottom four
-  rows and repaints them over whatever the pane drew, which is enough for a
-  pane that paints in place and is not enough for scrollback: there is none, and
-  the agent's own cursor is not visible, because the cursor is parked on the
-  input line. The status line saying `waiting on the operator` is what tells you
-  the agent is at a prompt.
-- **Nothing starts the stream for you.** `serve` is a foreground command you run
-  and stop; the plugin's startup hook still starts only the poller.
-- **The transcript comes from the agent's own session file**, read by an
-  adapter for that agent kind (`pi` or Claude Code). Herdr does not report a
-  session for every kind, and there is no adapter for the ones it does not. When
-  no file can be found, this falls back to
-  reading the pane's terminal and labels the comment as a partial transcript —
-  readable, but with no cursor for incremental sync and collapsed tool calls.
-- **Nothing has driven the agent from a real comment yet.** Transcript comments
-  have been posted for real — two on the first share's pull request — but the
-  inbound direction, a collaborator's `/agent` comment reaching the agent, has
-  only ever run against a fake server. See `## Known gaps` in ADR-002, ADR-003
-  and ADR-004.
+## The pull request is the record
+
+Your collaborator installs nothing to follow the *thread* — no Herdr, no
+herdr-huddle, no token. It is a normal pull request, and the URL is the whole
+invitation. Watching the agent live is the one thing that needs a client.
+
+- **The body** is a header, written once when the share opens. It says what the
+  thread is and what the `/agent` rules are.
+- **The transcript** arrives as comments, one per completed agent turn, each
+  marked as this tool's own output. Nothing is posted while the agent is still
+  working.
+- **Instructions** are comments that start with `/agent`, delivered to the agent
+  tagged as third-party input carrying the author's login, so the agent has no
+  reason to treat them as coming from you.
+- **The only acknowledgement is a 👀 reaction**, added when an instruction is
+  held back because the agent is busy. A refused one gets nothing: the reason
+  goes to the operator's log and nowhere public.
+- **The diff is empty** until *you* commit. Uncommitted work is deliberately not
+  mirrored: a diff that changes under a reviewer without a commit is a lie.
 
 ## Commands
 
@@ -266,17 +191,94 @@ herdr-huddle join [address] [--addr 127.0.0.1:8787]
 
 `serve` opens one pane's huddle. The pane **and** the allowlist come from the
 same active share — no share, no server, because there would be nothing to gate
-it with; `--pane` picks which share when several are active. It starts a quick
-tunnel unless `--no-tunnel` is given and prints the line to send, and it answers
-the door unless `--open` or `--closed` decides for it. `join` takes that address
-(or `--addr`), proves who you are, and draws the room in the current terminal —
-type a line to send it to the agent, Ctrl-C to leave.
+it with; `--pane` picks which share when several are active.
 
-`share --dry-run` reports what would happen and changes nothing — no token
-needed, no branch, no push, no pull request. `poll --once` makes a single pass and
-prints what it did, which is the way to see what the daemon has been doing
-without waiting for it. `poll` on its own is the daemon the plugin's startup hook
-starts; it takes a pid lock, so starting it twice is harmless.
+`share --dry-run` reports what would happen and changes nothing: no token needed,
+no branch, no push, no pull request. `poll --once` makes a single pass and prints
+what it did, which is how to see what the daemon has been doing without waiting
+for it. `poll` on its own is the daemon the plugin's startup hook starts; it takes
+a pid lock, so starting it twice is harmless.
+
+## Before you rely on it
+
+**The door is the whole gate.** `serve` listens on `127.0.0.1`, but by default
+puts a Cloudflare quick tunnel in front of it — and a quick tunnel cannot have
+Cloudflare Access in front either (it needs a zone of yours). So GitHub pairing —
+a token presented first, resolved to a login, then either on the allowlist or
+admitted by you — is the *only* thing between that URL and your pane: no rate
+limit, no second factor. `--no-tunnel` removes the exposure entirely. The token
+itself only ever travels over `wss://` or loopback; the client refuses a
+cleartext address.
+
+**Letting someone in is giving them your agent.** It runs with your permissions,
+in your worktree, on your quota. The prompt wrapper says the message is untrusted
+and carries its author's login, but that is a defence, not a sandbox: an agent
+that obeys a message can do anything you could. `--open` makes the link the
+entire boundary with no human in the loop, which is exactly why it is a flag and
+not the default.
+
+**The permission gate is never delegated.** When the agent stops for approval,
+only you can answer, at your terminal. Herdr refuses a prompt to a blocked agent
+outright and this tool does not try; it posts a comment saying the agent is
+waiting, so your collaborator is not left guessing.
+
+**The inbound comment path has never met a real collaborator.** Transcript
+comments have been posted for real, but a `/agent` comment reaching the agent has
+only ever run against a fake server. See `## Known gaps` in ADR-002, ADR-003 and
+ADR-004.
+
+<details>
+<summary><b>More limits, in detail</b> — GitHub's constraints, the record, the stream, the TUI</summary>
+
+- **On a private repository, your collaborator needs at least read access to
+  comment at all.** `--invite` asks for it (`permission: pull`). On a work org
+  where you are not an admin that request will fail — the share says so and
+  carries on, and you have to get access granted another way. This is a hard
+  GitHub limit, not something this tool can work around.
+- **Everything posted into the pull request is secret-scanned first**, but the
+  scan is a pattern match, not a guarantee. The local session file is the
+  authoritative record; the pull request is a projection of it.
+- **Answering `y` is not reversible from here.** That admission *is* written to
+  the share record, which is the point. Taking it back means editing
+  `shares.json`; the poller picks the change up on its next pass, though a
+  running `serve` keeps them until it restarts.
+- **A dead token refuses cleanly.** If GitHub no longer accepts the stored token
+  the gate says `GitHub could not confirm the token` and shows nothing; run
+  `auth login` again. The same dead token stops `poll` posting, so the two fail
+  together.
+- **The token a collaborator pairs with is not saved** — it proves who they are
+  for that session only, and never replaces your repo-scoped one.
+- **The record trails delivery, by design.** Every delivered instruction is
+  posted as a comment opening with this tool's marker, so the poller recognises
+  it as ours and never delivers it twice. GitHub's issue-comment API has no reply
+  threading, so the record attributes the turn rather than nesting under it. If
+  GitHub is unreachable, records queue (up to 100) and are retried while `serve`
+  runs — delivery never waits for them — and anything still queued at shutdown is
+  logged, not hidden.
+- **A resize costs a fresh stream.** `observe` takes no resize — that is what
+  makes it read-only by construction — so a joiner whose window changes gets a
+  restarted observer and a complete repaint. Dragging a window edge restarts it
+  repeatedly. `--cols`/`--rows` are only the fallback for a client that cannot
+  measure itself.
+- **The joiner's TUI does not emulate a terminal.** It reserves the bottom four
+  rows and repaints them over whatever the pane drew, which is enough for a pane
+  that paints in place and not enough for scrollback: there is none, and the
+  agent's own cursor is not visible because the cursor is parked on the input
+  line. The status line saying `waiting on the operator` is what tells you the
+  agent is at a prompt.
+- **Nothing starts the stream for you.** `serve` is a foreground command you run
+  and stop; the plugin's startup hook still starts only the poller. A dropped
+  tunnel ends the room, and nothing redials.
+- **Typing into the pane directly stays discouraged.** The agent would record it
+  as the operator's own words, which costs the record its attribution.
+- **The transcript comes from the agent's own session file**, read by an adapter
+  for that agent kind. Herdr does not report a session for every kind and there
+  is no adapter for the ones it does not; when no file can be found this falls
+  back to reading the pane's terminal and labels the comment as a partial
+  transcript — readable, but with no cursor for incremental sync and with
+  collapsed tool calls.
+
+</details>
 
 ## Development
 
@@ -289,3 +291,20 @@ without a token, so the suite runs offline. Everything that writes to a
 repository — branches, empty commits, pushes — is tested against a local bare
 repository as `origin`, and everything that writes to GitHub is tested against
 fakes.
+
+## Design
+
+Every decision, with the alternatives it rejected, is in
+[`docs/adr/`](docs/adr/) — read ADR-001 first.
+
+| ADR | Decision |
+|-----|----------|
+| [001](docs/adr/ADR-001-github-pr-as-shared-thread.md) | A GitHub pull request is the shared thread |
+| [002](docs/adr/ADR-002-share-branch-and-push.md) | The share's branch, and what gets pushed |
+| [003](docs/adr/ADR-003-thread-contents-and-share-lifecycle.md) | What goes in the thread, and when a share dies |
+| [004](docs/adr/ADR-004-transcript-adapters-per-agent-kind.md) | One transcript adapter per agent kind |
+| [005](docs/adr/ADR-005-live-multiplayer.md) | Multiplayer as a live stream, with GitHub as the ledger |
+| [006](docs/adr/ADR-006-quick-tunnel-door.md) | The door: quick tunnel, WebSocket, pairing as the gate |
+| [007](docs/adr/ADR-007-the-huddle-room.md) | The stream becomes a room: knock to join, a viewport each |
+
+The vocabulary this is all written in is in [`CONTEXT.md`](CONTEXT.md).
