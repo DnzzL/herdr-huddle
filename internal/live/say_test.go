@@ -64,6 +64,13 @@ func (f *fakeLedger) Post(_ context.Context, in thread.LiveInstruction) error {
 	return nil
 }
 
+// posted returns what actually reached the thread, in order.
+func (f *fakeLedger) posted() []thread.LiveInstruction {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]thread.LiveInstruction(nil), f.posts...)
+}
+
 func (f *fakeLedger) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

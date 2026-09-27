@@ -17,11 +17,11 @@ import (
 // the record after the fact.
 type LiveInstruction struct {
 	// Author is the collaborator's login, proved by the gate.
-	Author string
+	Author string `json:"author"`
 	// Text is what they asked for, verbatim.
-	Text string
+	Text string `json:"text"`
 	// At is when it was delivered.
-	At time.Time
+	At time.Time `json:"at"`
 }
 
 // Body renders the record comment.

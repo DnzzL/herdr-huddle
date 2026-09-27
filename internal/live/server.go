@@ -107,6 +107,10 @@ type Server struct {
 	// timeout of its own: an unanswered post must become a queued record, not
 	// a goroutine holding a record that is neither posted nor queued.
 	LedgerTimeout time.Duration
+	// Spool is where records the thread would not take are written down, so a
+	// restart owes what this process owed. Optional, and a server without one
+	// loses its queue on exit — which is what this used to do to everybody.
+	Spool Spool
 
 	ledgerMu sync.Mutex
 	pending  []thread.LiveInstruction
@@ -162,18 +166,46 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		_ = ln.Close()
 	}()
 
+	s.recover()
+
 	go s.flushLoop(ctx)
 	go s.room().watchAgent(ctx, s.Pane, s.Status, s.StatusInterval)
 
 	if err := hs.Serve(ln); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("live: serve: %w", err)
 	}
-	// A record owed at shutdown is owed forever: the queue is in memory, so
-	// say how much was lost rather than exiting clean.
 	if n := s.queuedCount(); n > 0 {
-		s.logf("shutting down with %d instruction record(s) never posted to the thread", n)
+		if s.Spool == nil {
+			// Nothing was written down, so this is the only notice anyone gets.
+			s.logf("shutting down with %d instruction record(s) never posted to the thread", n)
+		} else {
+			s.logf("shutting down owing the thread %d instruction record(s); they are written down and will be retried next time", n)
+		}
 	}
 	return nil
+}
+
+// recover picks up what a previous run still owed the thread.
+//
+// The records are prepended, oldest first: a restart owes its predecessor's
+// debts before anything it takes on itself, and the thread reads in the order
+// things were said.
+func (s *Server) recover() {
+	if s.Spool == nil {
+		return
+	}
+	owed, err := s.Spool.Load()
+	if err != nil {
+		s.logf("could not read the instruction records a previous run owed: %v", err)
+		return
+	}
+	if len(owed) == 0 {
+		return
+	}
+	s.ledgerMu.Lock()
+	s.pending = append(owed, s.pending...)
+	s.ledgerMu.Unlock()
+	s.logf("carrying over %d instruction record(s) a previous run never posted", len(owed))
 }
 
 // DefaultLedgerInterval is how often a queued record is retried.
@@ -225,9 +257,6 @@ func (s *Server) flush(ctx context.Context) {
 			s.logf("still could not record @%s's instruction: %v", in.Author, err)
 		}
 	}
-	if len(keep) == 0 {
-		return
-	}
 	s.ledgerMu.Lock()
 	// Oldest first, including whatever arrived meanwhile; the cap keeps a
 	// permanently broken ledger from growing without bound.
@@ -236,7 +265,20 @@ func (s *Server) flush(ctx context.Context) {
 		s.pending = s.pending[overflow:]
 		s.logf("dropped %d oldest instruction record(s): the ledger has been failing for too long", overflow)
 	}
+	// Written down whether the queue grew or emptied: a posted record must
+	// stop being owed, or a restart posts it to the thread a second time.
+	s.writeDownLocked()
 	s.ledgerMu.Unlock()
+}
+
+// writeDownLocked persists the queue. The caller holds ledgerMu.
+func (s *Server) writeDownLocked() {
+	if s.Spool == nil {
+		return
+	}
+	if err := s.Spool.Save(s.pending); err != nil {
+		s.logf("could not write down the %d instruction record(s) still owed: %v", len(s.pending), err)
+	}
 }
 
 // ledgerCtx bounds one ledger attempt without shortening the connection's
@@ -669,6 +711,7 @@ func (s *Server) speak(ctx context.Context, st *seat, login, text string) {
 		if err := s.Ledger.Post(postCtx, record); err != nil {
 			s.ledgerMu.Lock()
 			s.pending = append(s.pending, record)
+			s.writeDownLocked()
 			s.ledgerMu.Unlock()
 			s.logf("could not record @%s's instruction yet: %v (queued)", login, err)
 		}

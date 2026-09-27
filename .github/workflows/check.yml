@@ -1,0 +1,28 @@
+# What `make check` runs locally, run again where everyone can see it.
+#
+# The suite is offline by construction: the live Herdr and live GitHub tests
+# skip themselves outside a pane and without a token, and everything that
+# writes to a repository is tested against a local bare repo. So this needs no
+# secrets and no services.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # gofmt, go vet and go test -race — the same three, in the same order,
+      # so a green terminal and a green badge mean the same thing.
+      - run: make check

@@ -57,9 +57,10 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
   one, and the operator's token is expired. Blocked/queued/held outcomes are
   exercised against fakes that speak herdr's error codes, not against herdr.
 - **Nothing manages the serve process.** It is a foreground command with no
-  lock, no idle rule and no supervision by the plugin, and it survives nothing:
-  no reconnect after a network blip or a dead `cloudflared`, no restart of a
-  dead pane's stream beyond the joiner being told and reconnecting. Its relation
+  lock, no idle rule and no supervision by the plugin. A dead `cloudflared` has
+  no defined behaviour, and a dead pane's stream is not restarted beyond the
+  joiner being told. (The *client* now redials — ADR-008 — so a network blip is
+  survived from that side, but nothing on this side is supervised.) Its relation
   to the startup hook and to ADR-003's "no active share" fast path is undecided.
 - **Scrollback and an agent restart mid-stream have not been watched beyond
   minutes.** (The agent-status summary and the per-joiner viewport, both gaps

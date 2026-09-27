@@ -191,8 +191,6 @@ room on every joiner's screen, and rendered at each joiner's own size.**
   typing and says nothing stays marked for up to `TypingTTL` plus a tick.
 - not tested: resize restart is measured against a fake observer, not against
   `herdr terminal session observe` on a real pane.
-- untouched: reconnect. A dropped tunnel still ends the room for everyone, and
-  the client does not redial (ADR-006's gap, unchanged).
 - untouched: there is no history in the room. The event line holds the last
   thing that happened and nothing before it, so in a three-person huddle an
   instruction can scroll past unread. An expandable panel is the obvious

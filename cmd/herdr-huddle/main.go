@@ -5,6 +5,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -513,6 +515,7 @@ func runServe(args []string) error {
 		Gate:           doorFor(shareStore(), state, *open, *closed, at, logf),
 		Instructor:     live.HerdrInstructor{},
 		Ledger:         threadLedger(ctx, state),
+		Spool:          spoolFor(state),
 		ThreadURL:      state.URL,
 		Host:           operatorLogin(ctx),
 		Moderate:       moderatorFor(*moderated, at),
@@ -811,6 +814,41 @@ func operatorLogin(ctx context.Context) string {
 		return ""
 	}
 	return login
+}
+
+// spoolFor is where this share's owed instruction records are written down.
+//
+// One file per share, never one shared file: the records are posted to a
+// specific pull request, so a restart that recovered another share's queue
+// would file one thread's instructions under another's — silently, and into
+// the thing that is supposed to be the record.
+func spoolFor(state share.State) live.Spool {
+	return live.FileSpool{Path: filepath.Join(configDir(), "pending", spoolName(state.Key())+".json")}
+}
+
+// spoolName turns a share key into a filename that is both readable and
+// unambiguous: the key with the awkward characters flattened, plus a short
+// digest of the original so two keys that flatten alike cannot collide.
+func spoolName(key string) string {
+	// The dot is deliberately not kept: a branch called `a/../b` would
+	// otherwise put `..` in a filename. It costs a little readability on
+	// branches with dots in them, and the digest is what carries uniqueness
+	// anyway.
+	flat := make([]rune, 0, len(key))
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			flat = append(flat, r)
+		default:
+			flat = append(flat, '-')
+		}
+	}
+	name := strings.Trim(string(flat), "-")
+	if name == "" {
+		name = "share"
+	}
+	sum := sha256.Sum256([]byte(key))
+	return name + "-" + hex.EncodeToString(sum[:4])
 }
 
 // printJoinLine is the whole instruction the collaborator receives: one line

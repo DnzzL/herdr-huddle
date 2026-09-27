@@ -38,6 +38,8 @@ request:
   the door, room chat, moderated steering, reconnect across a server restart.
 - The outbound record: transcript comments really were posted to a real pull
   request.
+- Instruction records a failing GitHub would not take survive a `serve`
+  restart: they are written down per share and carried over.
 
 **Not proven yet**, and each one is a thing a second person would hit:
 
@@ -49,9 +51,6 @@ request:
   unknown.
 - **Live steering has never met a real agent** either — the path runs to the
   `herdr agent prompt` call and is exercised against fakes.
-- **A `serve` restart loses the record of instructions it had not yet posted.**
-  The queue is in memory. The pull request is the artifact, so this is the gap
-  that costs the most.
 - **Tokens expire (GitHub issues 8-hour ones) and nothing refreshes them.** When
   yours dies, `poll` stops recording and `join` stops working until you run
   `auth login` again.

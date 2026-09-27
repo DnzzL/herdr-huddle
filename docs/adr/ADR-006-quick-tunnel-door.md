@@ -103,16 +103,15 @@ transiently with `nix run`; local origin on `127.0.0.1:8791`):
   a few short sessions. A long-lived stream across resize, scrollback, agent restarts
   and multi-hundred-KB full paints through the tunnel has not been run.
 - **Quick tunnel lifetime, rate and abuse limits are undocumented** (the vendor page
-  states use cases only). A multi-hour collaboration session is untested; the tunnel
-  may be throttled or dropped without notice, and there is no reconnect yet.
+  states use cases only). A multi-hour collaboration session is untested, and the
+  tunnel may be throttled or dropped without notice. The client redials (ADR-008),
+  which covers a blip but not the operator restarting `serve` — that mints a new
+  URL, and the old one is gone.
 - **SSE/chunked buffering is measured on this path only** — one edge, one day, one
   cloudflared version. Not portable to Cloudflare zones (which have their own
   settings) or to other relays.
 - **No panic path for a flapping tunnel:** if `cloudflared` dies mid-session,
   `serve` currently has no defined behaviour (restart, report, or exit) — undecided.
-- **Queued records are in memory only.** A `serve` restart loses whatever the
-  ledger still owed; the shutdown log says how much, but nothing is persisted
-  and replayed.
 - **Tokens can die and nothing refreshes them.** GitHub may issue expiring
   access tokens (8 hours); when the stored one expires, `join` and `poll` both
   fail until `auth login` runs again. The gate reports this honestly but has no

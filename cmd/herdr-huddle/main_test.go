@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DnzzL/herdr-huddle/internal/github"
+	"github.com/DnzzL/herdr-huddle/internal/live"
 	"github.com/DnzzL/herdr-huddle/internal/poll"
 	"github.com/DnzzL/herdr-huddle/internal/repo"
 	"github.com/DnzzL/herdr-huddle/internal/share"
@@ -841,4 +842,57 @@ func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// Owed records are posted to a specific pull request, so two shares must never
+// share one queue file: a restart that recovered the wrong one would file one
+// thread's instructions under another's, silently, into the thing that is
+// supposed to be the record.
+func TestSpoolsAreNotSharedBetweenShares(t *testing.T) {
+	a := share.State{Repo: "acme/demo", Branch: "herdr/one"}
+	b := share.State{Repo: "acme/demo", Branch: "herdr/two"}
+	other := share.State{Repo: "other/demo", Branch: "herdr/one"}
+
+	pathOf := func(st share.State) string {
+		spool, ok := spoolFor(st).(live.FileSpool)
+		if !ok {
+			t.Fatalf("spoolFor returned %T, want a FileSpool", spoolFor(st))
+		}
+		return spool.Path
+	}
+	seen := map[string]string{}
+	for _, st := range []share.State{a, b, other} {
+		path := pathOf(st)
+		if was, clash := seen[path]; clash {
+			t.Fatalf("%s and %s share the queue file %s", was, st.Key(), path)
+		}
+		seen[path] = st.Key()
+	}
+
+	// The name stays readable, and stable across runs.
+	if pathOf(a) != pathOf(share.State{Repo: "acme/demo", Branch: "herdr/one"}) {
+		t.Error("the same share must always get the same queue file")
+	}
+	if !strings.Contains(filepath.Base(pathOf(a)), "acme-demo") {
+		t.Errorf("queue file %q should be recognisable as its share's", filepath.Base(pathOf(a)))
+	}
+}
+
+// A share key with characters a filesystem dislikes must still produce one
+// usable, collision-free name.
+func TestSpoolNameFlattensAwkwardKeys(t *testing.T) {
+	for _, key := range []string{
+		"acme/demo#herdr/feature",
+		"acme/demo#herdr/../../escape",
+		"a b/c#d",
+		"",
+	} {
+		got := spoolName(key)
+		if strings.ContainsAny(got, `/\ `) || strings.Contains(got, "..") {
+			t.Errorf("spoolName(%q) = %q, which is not a safe filename", key, got)
+		}
+	}
+	if spoolName("acme/demo#a") == spoolName("acme/demo#b") {
+		t.Error("two different shares flattened to one name")
+	}
 }

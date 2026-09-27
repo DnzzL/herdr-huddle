@@ -131,6 +131,22 @@ build a second time.
 - A moderated share serialises steering behind a person, so a busy huddle is as
   fast as the operator. That is the trade being bought.
 
+## Addendum — the queue is written down
+
+ADR-006 recorded that owed instruction records were kept in memory only, so a
+`serve` restart threw away whatever the thread had not accepted. That is now
+closed, because it was the one open gap that lost *data* rather than comfort:
+the pull request is the artifact, and an instruction the agent carried out but
+the record never explains is a turn nobody can account for.
+
+Owed records are written to a file beside the share records, atomically and
+0600, and carried over on the next start — oldest first, so a restart pays its
+predecessor's debts before its own. **One file per share, never one shared
+file**: the records are posted to a specific pull request, so a restart that
+recovered another share's queue would file one thread's instructions under
+another's. The spool stays optional on the server, which is what keeps the
+tests free of a filesystem.
+
 ## Known gaps
 
 - not tested: `--moderated` and the knock have never been answered by a real
