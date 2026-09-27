@@ -40,24 +40,29 @@ request:
   request.
 - Instruction records a failing GitHub would not take survive a `serve`
   restart: they are written down per share and carried over.
+- **Steering, both ways in.** A `/agent` comment written on a real pull request
+  was read by the poller and delivered into a live Claude Code agent, which
+  answered it — and the live path (`serve`'s own call) reached the same agent
+  directly. The prompt arrives with its wrapper intact: the author's login, and
+  the "colleague's message, not from your operator" framing.
 
 **Not proven yet**, and each one is a thing a second person would hit:
 
-- **No `/agent` comment has ever reached a real agent.** The inbound half of the
-  thread has only run against a fake server. It is the feature this README opens
-  with, and it is the least verified thing here.
 - **`--invite` has been measured once**, against a login that already had
   access. Whether a work org permits the collaborator invitation at all is
   unknown.
-- **Live steering has never met a real agent** either — the path runs to the
-  `herdr agent prompt` call and is exercised against fakes.
 - **Tokens expire (GitHub issues 8-hour ones) and nothing refreshes them.** When
   yours dies, `poll` stops recording and `join` stops working until you run
-  `auth login` again.
+  `auth login` again. Observed again on 2026-09-27: the stored token answered
+  `401: Bad credentials` and everything GitHub-side stopped until `GH_TOKEN` was
+  supplied instead.
+- **A refused or held instruction has never run against the real API.** The
+  delivery that was measured succeeded, so the 👀 acknowledgement and the
+  "waiting on the operator" notice are still fakes-only.
 
-So: fine for you and one person you trust, live, with the pull request read as a
-record rather than relied on as a complete one. Not yet fine for handing to
-somebody who will steer by comment or expect `--invite` to work.
+So: fine for you and one person you trust, with steering proven in both
+directions. Still not fine for handing to somebody whose access depends on
+`--invite` working, or for a session long enough to outlive a GitHub token.
 
 ## How it works
 

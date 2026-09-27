@@ -52,10 +52,14 @@ And a trust fact: the allowlist — not the prompt wrapper — is the real secur
   `herdr agent prompt`, recording each delivered one on the thread. Verified on
   0.9.0 against real GitHub (a dead token refused with zero bytes drawn, a gate
   pass logged) and against this machine's share record.
-- **Live injection has never met a real agent.** The delivery path runs to the
-  `herdr agent prompt` call, but no agent pane exists on this machine to receive
-  one, and the operator's token is expired. Blocked/queued/held outcomes are
-  exercised against fakes that speak herdr's error codes, not against herdr.
+- **Live injection has met a real agent** (2026-09-27). `HerdrInstructor` — the
+  exact call `speak` makes — delivered into a live Claude Code pane, which
+  answered. `internal/live/live_agent_test.go` is that test, behind the
+  `liveagent` build tag so it never runs by accident against somebody's working
+  agent.
+- not verified: the blocked/queued/held outcomes. The delivery that was measured
+  succeeded, so those branches are still only exercised against fakes that speak
+  herdr's error codes.
 - **Nothing manages the serve process.** It is a foreground command with no
   lock, no idle rule and no supervision by the plugin. A dead `cloudflared` has
   no defined behaviour, and a dead pane's stream is not restarted beyond the
