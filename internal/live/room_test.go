@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -273,5 +274,150 @@ func TestClampViewport(t *testing.T) {
 				t.Errorf("clampViewport = %dx%d, want %dx%d", cols, rows, c.wantCols, c.wantRows)
 			}
 		})
+	}
+}
+
+// The typing signal is the one that stops two people asking the agent for the
+// same thing at once, so it has to reach the other person — and never be
+// echoed back to the person whose hands are moving.
+func TestTypingReachesTheRestOfTheRoom(t *testing.T) {
+	obs := &fakeObserver{release: make(chan struct{})}
+	addr := roomServer(t, obs)
+
+	ana := dialSilent(t, addr)
+	defer ana.Close()
+	if _, err := io.WriteString(ana, `{"type":"hello","token":"tok-a"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	bo := dialAs(t, addr, Frame{Token: "tok-b"})
+	await(t, bo, "both of us in the room", func(f Frame) bool { return f.Type == TypeRoom && len(f.Members) == 2 })
+
+	if _, err := io.WriteString(ana, `{"type":"typing","on":true}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	seen := await(t, bo, "ana typing", func(f Frame) bool { return f.Type == TypeRoom && len(f.Typing) > 0 })
+	if len(seen.Typing) != 1 || seen.Typing[0] != "ana" {
+		t.Errorf("typing = %v, want [ana]", seen.Typing)
+	}
+
+	if _, err := io.WriteString(ana, `{"type":"typing","on":false}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, bo, "ana stopping", func(f Frame) bool { return f.Type == TypeRoom && len(f.Typing) == 0 })
+}
+
+// Nobody is told they are typing: a client knows what its own hands are doing,
+// and an echo would fight the input line it is drawn under.
+func TestATypistIsNotToldTheyAreTyping(t *testing.T) {
+	obs := &fakeObserver{release: make(chan struct{})}
+	addr := roomServer(t, obs)
+
+	ana := dialSilent(t, addr)
+	defer ana.Close()
+	if _, err := io.WriteString(ana, `{"type":"hello","token":"tok-a"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(&deadlineConn{ana})
+	await(t, reader, "the room", func(f Frame) bool { return f.Type == TypeRoom })
+
+	// A second person, so the claim is worth broadcasting at all.
+	bo := dialAs(t, addr, Frame{Token: "tok-b"})
+	await(t, bo, "bo arriving", func(f Frame) bool { return f.Type == TypeRoom && len(f.Members) == 2 })
+
+	if _, err := io.WriteString(ana, `{"type":"typing","on":true}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, bo, "bo being told", func(f Frame) bool { return f.Type == TypeRoom && len(f.Typing) == 1 })
+
+	// Everything ana has been sent up to her own delivery, inspected: not one
+	// record may name her as typing.
+	if _, err := io.WriteString(ana, `{"type":"say","text":"go"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		record := await(t, reader, "records addressed to ana", func(Frame) bool { return true })
+		for _, who := range record.Typing {
+			if strings.EqualFold(who, "ana") {
+				t.Fatalf("ana was told she is typing: %+v", record)
+			}
+		}
+		if record.Type == TypeSaid {
+			return
+		}
+	}
+}
+
+// Sending finishes the sentence: a claim left standing would show the author
+// as still typing what they have already sent.
+func TestSendingClearsTheTypingClaim(t *testing.T) {
+	obs := &fakeObserver{release: make(chan struct{})}
+	addr := roomServer(t, obs)
+
+	ana := dialSilent(t, addr)
+	defer ana.Close()
+	if _, err := io.WriteString(ana, `{"type":"hello","token":"tok-a"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	bo := dialAs(t, addr, Frame{Token: "tok-b"})
+	await(t, bo, "both of us in the room", func(f Frame) bool { return f.Type == TypeRoom && len(f.Members) == 2 })
+
+	if _, err := io.WriteString(ana, `{"type":"typing","on":true}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, bo, "ana typing", func(f Frame) bool { return f.Type == TypeRoom && len(f.Typing) > 0 })
+
+	if _, err := io.WriteString(ana, `{"type":"say","text":"ship it"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, bo, "ana no longer typing", func(f Frame) bool { return f.Type == TypeRoom && len(f.Typing) == 0 })
+}
+
+// A claim made by a client that then dies must lapse on its own: a typing
+// indicator that is sometimes a ghost is worse than none.
+func TestATypingClaimLapses(t *testing.T) {
+	st := newSeat("ana")
+	r := &room{seats: []*seat{st}}
+
+	st.typingUntil = time.Now().Add(-time.Second)
+	if got := r.typistsLocked(); len(got) != 0 {
+		t.Errorf("typists = %v, want a lapsed claim to count for nothing", got)
+	}
+	st.typingUntil = time.Now().Add(TypingTTL)
+	if got := r.typistsLocked(); len(got) != 1 {
+		t.Errorf("typists = %v, want the standing claim", got)
+	}
+}
+
+// The room's heartbeat lapses typing claims whether or not the server was
+// given anything that can read the agent's status — and, the part that matters,
+// *tells the room* when one lapses.
+//
+// Zeroing the claim without announcing it is not a fix: every joiner's screen
+// keeps showing somebody typing until something else happens to trigger a
+// broadcast, which on a quiet agent is never. That was a real bug, and it was
+// invisible to a test that only checked the field.
+func TestALapsedTypingClaimIsAnnounced(t *testing.T) {
+	ana, bo := newSeat("ana"), newSeat("bo")
+	r := &room{seats: []*seat{ana, bo}}
+	ana.typingUntil = time.Now().Add(20 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.watchAgent(ctx, "", nil, 5*time.Millisecond)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case raw := <-bo.out:
+			frame, err := ParseFrame(raw)
+			if err != nil {
+				t.Fatalf("a record did not parse: %v", err)
+			}
+			if frame.Type == TypeRoom && len(frame.Typing) == 0 {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the lapse was never announced, so @ana would appear to type forever")
+		}
 	}
 }

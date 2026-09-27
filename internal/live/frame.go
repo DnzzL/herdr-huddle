@@ -42,6 +42,11 @@ const (
 	// TypeResize asks for the stream to be repainted at a new size.
 	// Client-to-server only; the server restarts that joiner's observe.
 	TypeResize = "resize"
+	// TypeTyping says somebody has started or stopped composing an
+	// instruction. Client-to-server as a claim about oneself; server-to-client
+	// as part of the room. It is the one signal that stops two people asking
+	// the agent for the same thing at once.
+	TypeTyping = "typing"
 )
 
 // EncodingANSI is the only payload encoding Herdr sends, and the only one worth
@@ -95,6 +100,17 @@ type Frame struct {
 	// Thread is the pull request the share is bound to, on a room record. The
 	// record of the huddle is worth nothing if nobody in it has the link.
 	Thread string `json:"thread,omitempty"`
+	// Host is the operator's login, on a room record: the person whose machine
+	// and agent this is. They are in the room without being connected to it —
+	// they are sitting at the pane — so they are named separately from
+	// Members, which is the list of joiners.
+	Host string `json:"host,omitempty"`
+	// Typing is who is composing an instruction right now, on a room record.
+	// Never includes the recipient: a client knows what its own hands are
+	// doing.
+	Typing []string `json:"typing,omitempty"`
+	// On is the claim a typing record carries: composing, or stopped.
+	On bool `json:"on,omitempty"`
 }
 
 // ParseFrame decodes one record.
@@ -129,7 +145,7 @@ func ParseFrame(line []byte) (Frame, error) {
 // a client does.
 func (f Frame) Known() bool {
 	switch f.Type {
-	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid, TypeRoom, TypeResize:
+	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid, TypeRoom, TypeResize, TypeTyping:
 		return true
 	}
 	return false

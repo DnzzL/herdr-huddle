@@ -176,6 +176,16 @@ func (s *Session) Resize(cols, rows int) error {
 	return s.write(Frame{Type: TypeResize, Width: cols, Height: rows})
 }
 
+// Typing says this joiner has started or stopped composing an instruction.
+//
+// It is a claim about oneself: the server attributes it to the login the gate
+// proved and ignores anything the record might name. The claim lapses on its
+// own (TypingTTL), so a client that dies mid-sentence stops appearing to type
+// without having to say so.
+func (s *Session) Typing(on bool) error {
+	return s.write(Frame{Type: TypeTyping, On: on})
+}
+
 func (s *Session) write(f Frame) error {
 	line, err := json.Marshal(f)
 	if err != nil {
@@ -210,23 +220,31 @@ func (s *Session) Draw(out, feedback io.Writer) error {
 func (s *Session) Close() error { return s.conn.Close() }
 
 // SaidLine words a delivery outcome for the room to read.
+//
+// It quotes what was asked for, not only that something was. Two people
+// steering one agent need to know whether the other just asked for the thing
+// they were about to ask for, and "delivered to the agent" does not tell them.
 func SaidLine(f Frame) string {
 	who := ""
 	if f.Author != "" {
-		who = "@" + f.Author + ": "
+		who = "@" + f.Author + " "
+	}
+	said := strings.TrimSpace(f.Text)
+	if said != "" {
+		said = "→ " + said + " · "
 	}
 	switch f.Status {
 	case StatusSent:
-		return who + "delivered to the agent"
+		return who + said + "delivered"
 	case StatusHeld:
-		return who + "held: " + f.Reason
+		return who + said + "held: " + f.Reason
 	case StatusFailed:
-		return who + "not delivered: " + f.Reason
+		return who + said + "not delivered: " + f.Reason
 	default:
 		if f.Reason != "" {
-			return who + f.Status + ": " + f.Reason
+			return who + said + f.Status + ": " + f.Reason
 		}
-		return who + f.Status
+		return who + said + f.Status
 	}
 }
 

@@ -83,6 +83,11 @@ type Server struct {
 	// agent so it knows where the message came from, and carried to every
 	// joiner so the room can find its own record (ADR-007).
 	ThreadURL string
+	// Host is the operator's login — the person at the pane. Optional, and
+	// omitted when the token cannot say who they are; without it a joiner
+	// alone in the room is told they are alone, which is false while the
+	// operator is watching (ADR-007).
+	Host string
 	// Status reports what the agent is doing, for the room. Optional: without
 	// it the room simply never says.
 	Status Statuser
@@ -113,7 +118,7 @@ const DefaultGateTimeout = 15 * time.Second
 
 // room returns the shared presence state, built once.
 func (s *Server) room() *room {
-	s.roomOnce.Do(func() { s.huddle = &room{thread: s.ThreadURL} })
+	s.roomOnce.Do(func() { s.huddle = &room{thread: s.ThreadURL, host: s.Host} })
 	return s.huddle
 }
 
@@ -394,6 +399,10 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 				s.speak(ctx, st, login, record.Text)
 			case TypeResize:
 				view.set(clampViewport(record.Width, record.Height, s.Cols, s.Rows))
+			case TypeTyping:
+				// A claim about oneself only: the seat is the subject, never
+				// anything the record names.
+				huddle.setTyping(st, record.On)
 			}
 		}
 	}()
@@ -589,6 +598,9 @@ func (s *Server) speak(ctx context.Context, st *seat, login, text string) {
 		st.sendFrame(Frame{Type: TypeSaid, Status: StatusFailed, Reason: "the message was empty", Author: login})
 		return
 	}
+	// Sending ends the sentence: leaving the claim standing would show the
+	// author as still typing what they have already sent.
+	s.room().setTyping(st, false)
 	instruction := thread.Instruction{Author: login, Text: text, URL: s.ThreadURL}
 	if err := s.Instructor.Deliver(ctx, s.Pane, instruction.Prompt()); err != nil {
 		status, reason := deliveryFailure(err)

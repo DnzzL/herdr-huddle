@@ -86,11 +86,37 @@ room on every joiner's screen, and rendered at each joiner's own size.**
    screen. Without a TTY, `join` falls back to today's raw render, so a pipe
    still works.
 
-5. **The pull request stays the artifact and is now visible from inside the
+5. **Presence is drawn on the people, and history on the event line.** The
+   status line is state — who is here, what each is doing, what the agent is
+   doing — and the event line is the last thing that happened. So the operator
+   appears in the roster marked `(host)` (they are in the room without being
+   connected to it, and a joiner told "you are the only one here" while the
+   operator watches is being told something false), somebody composing appears
+   as `@ana (typing…)` on their own name, and each person keeps one colour
+   everywhere so the room is scanned rather than read.
+
+   The first attempt put typing on the event line, where it *outranked* the
+   last thing said. That is wrong in a way worth recording: somebody else
+   composing then hides the confirmation that your own instruction was
+   delivered, which is the one line you are waiting to read. A fact about a
+   person belongs on the person.
+
+6. **A delivery outcome quotes what was asked for.** `@ana → make the gate
+   refuse an expired token · delivered`, not `@ana: delivered`. Two people
+   steering one agent need to know whether the other just asked for the thing
+   they were about to ask for, and the outcome alone does not tell them.
+
+7. **A typing claim lapses on its own** (`TypingTTL`). It is made by a client
+   that can die mid-sentence, and an indicator that is sometimes a ghost is
+   worse than no indicator. The claim is renewed while the person types rather
+   than repeated per keystroke, and the room is told only when the *set* of
+   typists changes.
+
+8. **The pull request stays the artifact and is now visible from inside the
    room.** The thread URL rides the `room` record and is drawn in the status
    line, because a huddle whose record nobody can find is not a record.
 
-6. **`golang.org/x/term` is the second dependency.** Raw mode and window size
+9. **`golang.org/x/term` is the second dependency.** Raw mode and window size
    are what a TUI is made of, and hand-rolling `termios` ioctls across Linux and
    macOS is more risk than a Go-team-maintained package. ADR-006 ended the
    zero-dependency property deliberately; this spends it a second time, for the
@@ -159,10 +185,18 @@ room on every joiner's screen, and rendered at each joiner's own size.**
 
 - not tested: the knock has never been answered by a real second person; the
   approver is exercised against a scripted stdin.
+- fragile: the typing indicator has a floor of one `StatusInterval` tick
+  (2 seconds) on how quickly a lapse is noticed, because the lapse is found by
+  the room's heartbeat rather than by a timer per claim. A person who stops
+  typing and says nothing stays marked for up to `TypingTTL` plus a tick.
 - not tested: resize restart is measured against a fake observer, not against
   `herdr terminal session observe` on a real pane.
 - untouched: reconnect. A dropped tunnel still ends the room for everyone, and
   the client does not redial (ADR-006's gap, unchanged).
+- untouched: there is no history in the room. The event line holds the last
+  thing that happened and nothing before it, so in a three-person huddle an
+  instruction can scroll past unread. An expandable panel is the obvious
+  answer and is deliberately not built: it fights "four rows and no more".
 - untouched: the agent's own cursor is not visible in the TUI, because the
   chrome repaint parks the cursor on the input line. A pane waiting on a `y/n`
   looks the same as an idle one, except for the status line that now says so.

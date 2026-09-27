@@ -4,8 +4,14 @@
 // so chrome cannot simply be printed alongside them: anything written between
 // frames lands inside the viewport the next frame repaints. The arrangement
 // here is the one ADR-007 settles on — the pane keeps the top of the terminal,
-// the bottom rows are ours, and they are repainted after every frame batch so
-// they survive a paint that clears the screen.
+// the bottom rows are ours, and they are repainted after every frame so they
+// survive a paint that clears the screen.
+//
+// The four rows have one job each, and the split matters: the status line is
+// *state* — who is here, what each of them is doing, what the agent is doing —
+// and the event line is *history*, the last thing that happened. Facts about
+// people belong on the people. Routing one through the event line means it
+// hides whatever was there, which is how a delivery confirmation goes unseen.
 //
 // Everything in this file is a pure function of the room's state. That is
 // deliberate: the layout is the part worth testing, and it is testable only
@@ -14,6 +20,7 @@ package tui
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"unicode/utf8"
 
@@ -44,8 +51,15 @@ type Room struct {
 	// You is the viewer's own login, so they can be named as "you" rather
 	// than listed twice.
 	You string
-	// Members is everyone connected, including You.
+	// Host is the operator's login — the person at the pane. They are in the
+	// room without being connected to it, so they are named separately from
+	// Members or a joiner alone would be told they are alone.
+	Host string
+	// Members is every joiner connected, including You.
 	Members []string
+	// Typing is who is composing an instruction right now, never including
+	// You.
+	Typing []string
 	// Agent is herdr's own status vocabulary, or empty when unknown.
 	Agent string
 	// Thread is the pull request URL the share is bound to.
@@ -55,15 +69,15 @@ type Room struct {
 // View is the whole of the chrome's state.
 type View struct {
 	Room  Room
-	Event string
+	Event line
 	Input string
 	// Cols and Rows are the terminal's, not the pane's.
 	Cols, Rows int
 }
 
 // ANSI pieces. Written out rather than pulled from a library: four lines of
-// chrome do not justify a dependency, and every sequence here is in the
-// subset every terminal this runs on has had for decades.
+// chrome do not justify a dependency, and every sequence here is in the subset
+// every terminal this runs on has had for decades.
 const (
 	reset   = "\x1b[0m"
 	dim     = "\x1b[2m"
@@ -71,6 +85,8 @@ const (
 	green   = "\x1b[32m"
 	yellow  = "\x1b[33m"
 	red     = "\x1b[31m"
+	blue    = "\x1b[34m"
+	magenta = "\x1b[35m"
 	cyan    = "\x1b[36m"
 	grey    = "\x1b[90m"
 	clrLine = "\x1b[2K"
@@ -79,6 +95,65 @@ const (
 	saveCursor    = "\x1b7"
 	restoreCursor = "\x1b8"
 )
+
+// span is a piece of a chrome row: what it says, and how it is painted.
+type span struct {
+	text  string
+	style string
+}
+
+// line is a row assembled from spans.
+//
+// It exists so that truncation counts what the terminal will *show*. Cutting a
+// styled string by byte or even by rune slices through escape sequences, which
+// leaves the terminal painting in a colour nobody asked for, for the rest of
+// the session.
+type line []span
+
+func (l line) add(style, text string) line {
+	if text == "" {
+		return l
+	}
+	return append(l, span{text: text, style: style})
+}
+
+// plain is the row as a person reads it, with no styling at all.
+func (l line) plain() string {
+	var b strings.Builder
+	for _, s := range l {
+		b.WriteString(s.text)
+	}
+	return b.String()
+}
+
+// render paints the row into at most cols columns, marking a truncation.
+func (l line) render(cols int) string {
+	if cols <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	left := cols
+	for _, s := range l {
+		if left <= 0 {
+			break
+		}
+		text := s.text
+		if width(text) > left {
+			// One column is kept for the ellipsis, so the row still ends by
+			// saying that it was cut.
+			text = fit(text, left)
+		}
+		left -= width(text)
+		if s.style == "" {
+			b.WriteString(text)
+			continue
+		}
+		b.WriteString(s.style)
+		b.WriteString(text)
+		b.WriteString(reset)
+	}
+	return b.String()
+}
 
 // Chrome renders the bottom rows and leaves the cursor on the input line,
 // where the person typing expects to find it.
@@ -94,25 +169,20 @@ func (v View) Chrome() string {
 
 	var b strings.Builder
 	b.WriteString(saveCursor)
-	lines := []string{
-		v.rule(cols),
-		v.status(cols),
-		v.event(cols),
-		v.prompt(cols),
-	}
-	for i, line := range lines {
-		fmt.Fprintf(&b, "\x1b[%d;1H%s%s", first+i, clrLine, line)
+	rows := []line{v.rule(cols), v.status(), v.event(), v.prompt(cols)}
+	for i, row := range rows {
+		fmt.Fprintf(&b, "\x1b[%d;1H%s%s", first+i, clrLine, row.render(cols))
 	}
 	b.WriteString(restoreCursor)
-	// The cursor is parked where the typing goes, after the restore, because
-	// a visible cursor anywhere else reads as the terminal having lost it.
+	// The cursor is parked where the typing goes, after the restore, because a
+	// visible cursor anywhere else reads as the terminal having lost it.
 	fmt.Fprintf(&b, "\x1b[%d;%dH", v.Rows, promptWidth(v.Input, cols))
 	return b.String()
 }
 
 // rule is the seam between the pane and the room, with the record's name on
 // the right so the pull request is never more than a glance away (ADR-007).
-func (v View) rule(cols int) string {
+func (v View) rule(cols int) line {
 	left := "── huddle "
 	right := ""
 	if short := shortThread(v.Room.Thread); short != "" {
@@ -120,65 +190,132 @@ func (v View) rule(cols int) string {
 	}
 	fill := cols - width(left) - width(right)
 	if fill < 0 {
-		right = ""
-		fill = cols - width(left)
+		right, fill = "", cols-width(left)
 	}
 	if fill < 0 {
 		fill = 0
 	}
-	return dim + left + strings.Repeat("─", fill) + right + reset
+	return line{}.add(dim, left+strings.Repeat("─", fill)+right)
 }
 
-// status is the room in one line: the agent's state, then who is in it.
-func (v View) status(cols int) string {
+// status is the room's state in one line: what the agent is doing, then who is
+// in the room.
+func (v View) status() line {
 	label, colour := agentState(v.Room.Agent)
-	plain := "● " + label
-	styled := colour + "●" + reset + " " + bold + label + reset
-
-	if who := v.roster(); who != "" {
-		plain += "   " + who
-		styled += "   " + dim + who + reset
+	row := line{}.add(colour, "●").add("", " ").add(bold, label)
+	if who := v.roster(); len(who) > 0 {
+		row = append(row.add("", "   "), who...)
 	}
-	if over := width(plain) - cols; over > 0 {
-		// Falling back to the unstyled line is the honest way to truncate:
-		// cutting a styled string mid-escape leaves the terminal in a colour
-		// it was never told to leave.
-		return fit(plain, cols)
-	}
-	return styled
+	return row
 }
 
-// roster names the room the way a person would: you first, then the others.
-func (v View) roster() string {
-	var others []string
-	you := false
+// roster names the room the way a person would: the host, then you, then
+// everyone else — each in their own colour, so the room is scanned rather than
+// read.
+func (v View) roster() line {
+	var people []line
+	seen := map[string]bool{}
+
+	typing := map[string]bool{}
+	for _, who := range v.Room.Typing {
+		typing[strings.ToLower(who)] = true
+	}
+
+	mark := func(login, note string) {
+		key := strings.ToLower(login)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		entry := line{}.add(personColour(login), "@"+login)
+		// Typing is a fact about a person, so it is drawn on the person —
+		// alongside (host), in the same shape. It deliberately does not live
+		// on the event line: somebody else composing must never hide the
+		// confirmation that your own instruction was delivered.
+		if typing[key] {
+			if note != "" {
+				note += ", typing…"
+			} else {
+				note = "typing…"
+			}
+		}
+		if note != "" {
+			entry = entry.add(dim, " ("+note+")")
+		}
+		people = append(people, entry)
+	}
+
+	you := func(note string) {
+		key := strings.ToLower(v.Room.You)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		entry := line{}.add(bold, "you")
+		if note != "" {
+			entry = entry.add(dim, " ("+note+")")
+		}
+		people = append(people, entry)
+	}
+
+	youIn := false
 	for _, member := range v.Room.Members {
 		if strings.EqualFold(member, v.Room.You) {
-			you = true
-			continue
+			youIn = true
 		}
-		others = append(others, "@"+member)
 	}
-	switch {
-	case len(others) == 0 && you:
-		return "you are the only one here"
-	case len(others) == 0:
-		return ""
-	case you:
-		return "you and " + strings.Join(others, ", ")
-	default:
-		return strings.Join(others, ", ")
+
+	// The host leads, because they are whose machine this is. "You" comes
+	// next, and everybody else after — which is also the order a person would
+	// say it in.
+	hosting := v.Room.Host != "" && strings.EqualFold(v.Room.Host, v.Room.You)
+	if hosting {
+		you("host")
+	} else if v.Room.Host != "" {
+		mark(v.Room.Host, "host")
 	}
+	if youIn || hosting {
+		you("")
+	}
+	for _, member := range v.Room.Members {
+		mark(member, "")
+	}
+
+	if len(people) == 0 {
+		return nil
+	}
+	// Alone, and worth saying plainly rather than as a list of one.
+	if len(people) == 1 && youIn && v.Room.Host == "" {
+		return line{}.add(dim, "you are the only one here")
+	}
+	return join(people, line{}.add(dim, ", "), line{}.add(dim, " and "))
 }
 
-func (v View) event(cols int) string {
-	if v.Event == "" {
-		return ""
+// join renders a list the way English does: commas, then "and" before the last.
+func join(parts []line, comma, last line) line {
+	var out line
+	for i, part := range parts {
+		switch {
+		case i == 0:
+		case i == len(parts)-1:
+			out = append(out, last...)
+		default:
+			out = append(out, comma...)
+		}
+		out = append(out, part...)
 	}
-	return grey + fit(v.Event, cols) + reset
+	return out
 }
 
-func (v View) prompt(cols int) string {
+// event is the last thing that happened, and only that.
+//
+// Who is typing is deliberately *not* here. It is state, not an event, and it
+// belongs on the person in the roster: routed through this line it would
+// outrank — and so hide — the confirmation that somebody's instruction was
+// delivered, for as long as anyone else kept typing.
+func (v View) event() line { return v.Event }
+
+func (v View) prompt(cols int) line {
 	marker := "› "
 	room := cols - width(marker)
 	if room < 1 {
@@ -190,7 +327,7 @@ func (v View) prompt(cols int) string {
 	if width(text) > room-1 {
 		text = tail(text, room-1)
 	}
-	return cyan + marker + reset + text
+	return line{}.add(cyan, marker).add("", text)
 }
 
 // promptWidth is the column the cursor belongs in, 1-based.
@@ -223,6 +360,22 @@ func agentState(status string) (string, string) {
 	default:
 		return status, grey
 	}
+}
+
+// people is the palette logins are coloured from. Red and yellow are left out
+// on purpose: they mean "the agent is blocked" and "the agent is working" one
+// line above, and a person whose name is the same red would read as an alarm.
+var people = []string{cyan, magenta, blue, green, "\x1b[96m", "\x1b[95m"}
+
+// personColour picks a login's colour, and picks the same one every time.
+//
+// Stability is the whole point: @ana is one colour in the roster, in the
+// typing line and in the record of what she asked for, so the room is scanned
+// rather than read word by word.
+func personColour(login string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(login)))
+	return people[int(h.Sum32())%len(people)]
 }
 
 // shortThread names the pull request the way people say it out loud.

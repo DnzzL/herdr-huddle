@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
@@ -22,7 +23,17 @@ type Client interface {
 	Run(live.Events) error
 	Say(text string) error
 	Resize(cols, rows int) error
+	Typing(on bool) error
 }
+
+// Keys that are not characters. They are carried as runes from the Unicode
+// private use area, which is the one range a person cannot type and so the one
+// range that can never be mistaken for input.
+const (
+	keyFirst rune = 0xE000 + iota
+	keyUp
+	keyDown
+)
 
 // Terminal control. The alternate screen is what makes leaving the huddle
 // restore the shell the person was in rather than leave a painted pane behind.
@@ -49,7 +60,25 @@ type App struct {
 	session    Client
 	paneRows   int
 	lastMember map[string]bool
+
+	// history is what this person has sent, oldest first, and histAt is where
+	// they are while walking back through it. Retyping an instruction that
+	// came back "held" is the papercut this exists to remove.
+	history []string
+	histAt  int
+
+	// typingOn is whether the room currently believes this person is
+	// composing, and typingAt is when we last said so. The claim is renewed
+	// rather than repeated per keystroke: the room would otherwise be told
+	// something it already knows, several times a second.
+	typingOn bool
+	typingAt time.Time
 }
+
+// typingRenew is how often a standing typing claim is renewed. Comfortably
+// inside live.TypingTTL, so a person typing slowly never flickers out of the
+// room's view.
+const typingRenew = 2 * time.Second
 
 // Smallest and fallback window. A pty opened without a size — a detached
 // `script`, a CI runner, a terminal multiplexer mid-attach — reports 0x0, and
@@ -103,8 +132,10 @@ func (a *App) Run(ctx context.Context, session Client) error {
 	cols, rows := Size(a.Out)
 
 	a.mu.Lock()
-	a.view.Cols, a.view.Rows, a.view.Event = cols, rows, a.Hint
+	a.view.Cols, a.view.Rows = cols, rows
+	a.view.Event = line{}.add(dim, a.Hint)
 	a.paneRows = PaneRows(rows)
+	a.histAt = 0
 	a.mu.Unlock()
 
 	a.writeRaw(enterAlt + clearScreen + a.scrollRegion())
@@ -169,13 +200,45 @@ func (a *App) key(r rune) bool {
 		a.edit(func([]rune) []rune { return nil })
 	case 23: // Ctrl-W
 		a.edit(dropWord)
+	case keyUp:
+		a.recall(-1)
+	case keyDown:
+		a.recall(+1)
 	default:
-		if r < 0x20 {
-			return false // an unhandled control key types nothing
+		if r < 0x20 || r >= keyFirst {
+			return false // an unhandled control or navigation key types nothing
 		}
 		a.edit(func(in []rune) []rune { return append(in, r) })
 	}
 	return false
+}
+
+// recall walks back through what this person has sent, and forward again.
+//
+// Walking past the newest entry lands on an empty line rather than sticking,
+// which is how every shell behaves and therefore what the hands expect.
+func (a *App) recall(step int) {
+	a.mu.Lock()
+	if len(a.history) == 0 {
+		a.mu.Unlock()
+		return
+	}
+	at := a.histAt + step
+	if at < 0 {
+		at = 0
+	}
+	if at > len(a.history) {
+		at = len(a.history)
+	}
+	a.histAt = at
+	if at == len(a.history) {
+		a.view.Input = ""
+	} else {
+		a.view.Input = a.history[at]
+	}
+	a.mu.Unlock()
+	a.repaint()
+	a.claimTyping()
 }
 
 // submit sends the typed line to the agent and clears the input.
@@ -187,24 +250,67 @@ func (a *App) submit() {
 	a.mu.Lock()
 	text := strings.TrimSpace(a.view.Input)
 	a.view.Input = ""
+	if text != "" && (len(a.history) == 0 || a.history[len(a.history)-1] != text) {
+		a.history = append(a.history, text)
+	}
+	a.histAt = len(a.history)
 	a.mu.Unlock()
+
+	// Whatever happens next, the sentence is finished.
+	a.stopTyping()
 
 	if text == "" {
 		a.repaint()
 		return
 	}
 	if err := a.session.Say(text); err != nil {
-		a.setEvent("could not send: " + err.Error())
+		a.setEvent(line{}.add(red, "could not send: "+err.Error()))
 		return
 	}
-	a.setEvent("sending: " + text)
+	a.setEvent(line{}.add(dim, "sending…"))
+}
+
+// claimTyping tells the room this person is composing, renewing a standing
+// claim rather than repeating it.
+func (a *App) claimTyping() {
+	a.mu.Lock()
+	empty := strings.TrimSpace(a.view.Input) == ""
+	fresh := a.typingOn && time.Since(a.typingAt) < typingRenew
+	if !empty {
+		a.typingOn, a.typingAt = true, time.Now()
+	}
+	a.mu.Unlock()
+
+	if empty {
+		a.stopTyping()
+		return
+	}
+	if fresh {
+		return
+	}
+	_ = a.session.Typing(true)
+}
+
+// stopTyping retracts the claim, if one is standing.
+func (a *App) stopTyping() {
+	a.mu.Lock()
+	was := a.typingOn
+	a.typingOn = false
+	a.mu.Unlock()
+	if was {
+		_ = a.session.Typing(false)
+	}
 }
 
 func (a *App) edit(f func([]rune) []rune) {
 	a.mu.Lock()
 	a.view.Input = string(f([]rune(a.view.Input)))
+	// Editing leaves the history where it was: the recalled line has been
+	// changed, so it is this person's line now, not entry number four.
+	a.histAt = len(a.history)
 	a.mu.Unlock()
 	a.repaint()
+	a.claimTyping()
 }
 
 // dropWord deletes the word before the cursor, trailing spaces included.
@@ -237,8 +343,15 @@ func (a *App) drawFrame(data []byte) error {
 // up sending the agent the same instruction.
 func (a *App) setRoom(f live.Frame) {
 	a.mu.Lock()
-	a.view.Room = Room{You: f.You, Members: f.Members, Agent: f.Agent, Thread: f.Thread}
-	if event := a.membershipEventLocked(f); event != "" {
+	a.view.Room = Room{
+		You:     f.You,
+		Host:    f.Host,
+		Members: f.Members,
+		Typing:  f.Typing,
+		Agent:   f.Agent,
+		Thread:  f.Thread,
+	}
+	if event := a.membershipEventLocked(f); len(event) > 0 {
 		a.view.Event = event
 	}
 	a.mu.Unlock()
@@ -248,44 +361,85 @@ func (a *App) setRoom(f live.Frame) {
 // membershipEventLocked words the difference between the last roster and this
 // one. The first roster is not a difference — everybody is new — so it says
 // nothing.
-func (a *App) membershipEventLocked(f live.Frame) string {
+func (a *App) membershipEventLocked(f live.Frame) line {
 	now := make(map[string]bool, len(f.Members))
 	for _, member := range f.Members {
 		now[strings.ToLower(member)] = true
 	}
 	first := a.lastMember == nil
-	var events []string
+	var event line
+	arrivals := func(who string, verb string) {
+		if len(event) > 0 {
+			event = event.add(dim, " · ")
+		}
+		event = event.add(personColour(who), "@"+who).add(dim, verb)
+	}
 	if !first {
 		for _, member := range f.Members {
 			if !a.lastMember[strings.ToLower(member)] && !strings.EqualFold(member, f.You) {
-				events = append(events, "@"+member+" joined")
+				arrivals(member, " joined")
 			}
 		}
 		for member := range a.lastMember {
 			if !now[member] && !strings.EqualFold(member, f.You) {
-				events = append(events, "@"+member+" left")
+				arrivals(member, " left")
 			}
 		}
 	}
 	a.lastMember = now
-	return strings.Join(events, " · ")
+	return event
 }
 
-// said words a delivery outcome, dropping the attribution when the person
-// reading it is the one who typed it.
+// said words a delivery outcome: who asked, what they asked for, and what
+// became of it.
+//
+// The text matters as much as the outcome. Two people steering one agent need
+// to know whether the other just asked for the thing they were about to ask
+// for, and "delivered to the agent" does not tell them that.
 func (a *App) said(f live.Frame) {
 	a.mu.Lock()
 	mine := f.Author != "" && strings.EqualFold(f.Author, a.view.Room.You)
 	a.mu.Unlock()
-	if mine {
-		f.Author = ""
+
+	row := line{}
+	switch {
+	case mine:
+		row = row.add(bold, "you")
+	case f.Author != "":
+		row = row.add(personColour(f.Author), "@"+f.Author)
 	}
-	a.setEvent(live.SaidLine(f))
+	if said := strings.TrimSpace(f.Text); said != "" {
+		row = row.add(dim, " → ").add("", said)
+	}
+
+	outcome, style := outcomeOf(f)
+	if len(row) > 0 {
+		row = row.add(dim, " · ")
+	}
+	a.setEvent(row.add(style, outcome))
 }
 
-func (a *App) setEvent(text string) {
+// outcomeOf words what became of an instruction, and colours it by whether
+// anybody needs to do something about it.
+func outcomeOf(f live.Frame) (string, string) {
+	switch f.Status {
+	case live.StatusSent:
+		return "delivered", green
+	case live.StatusHeld:
+		return "held: " + f.Reason, yellow
+	case live.StatusFailed:
+		return "not delivered: " + f.Reason, red
+	default:
+		if f.Reason != "" {
+			return f.Status + ": " + f.Reason, grey
+		}
+		return f.Status, grey
+	}
+}
+
+func (a *App) setEvent(row line) {
 	a.mu.Lock()
-	a.view.Event = text
+	a.view.Event = row
 	a.mu.Unlock()
 	a.repaint()
 }
@@ -307,7 +461,7 @@ func (a *App) resized() {
 	a.writeRaw(clearScreen + a.scrollRegion())
 	a.repaint()
 	if err := a.session.Resize(cols, pane); err != nil {
-		a.setEvent("could not ask for a repaint at the new size: " + err.Error())
+		a.setEvent(line{}.add(red, "could not ask for a repaint at the new size: "+err.Error()))
 	}
 }
 
@@ -338,32 +492,79 @@ func (a *App) writeRaw(s string) {
 	_, _ = io.WriteString(a.Out, s)
 }
 
-// readKeys turns the raw terminal into keystrokes, swallowing the escape
-// sequences an arrow key or a mouse sends: typing them into the instruction
-// box is worse than ignoring them.
+// readKeys turns the raw terminal into keystrokes.
+//
+// Escape sequences are parsed rather than discarded, because two of them are
+// wanted: up and down walk back through what this person has already sent.
+// Everything else a terminal sends — function keys, a mouse, a bracketed
+// paste — is dropped, since typing it into the instruction box is worse than
+// ignoring it.
 func (a *App) readKeys(ctx context.Context, out chan<- rune) {
 	defer close(out)
 	reader := bufio.NewReader(a.In)
+	send := func(r rune) bool {
+		select {
+		case out <- r:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	for {
 		r, _, err := reader.ReadRune()
 		if err != nil {
 			return
 		}
-		if r == 0x1b {
-			// Whatever arrived with the escape is the rest of its sequence:
-			// a key press reaches the terminal in one read, a typed escape
-			// alone does not.
-			for reader.Buffered() > 0 {
-				if _, err := reader.ReadByte(); err != nil {
-					return
-				}
+		if r != 0x1b {
+			if !send(r) {
+				return
 			}
 			continue
 		}
-		select {
-		case out <- r:
-		case <-ctx.Done():
+		// A key press reaches the terminal as one read, so an escape with
+		// nothing behind it is a person pressing Esc, not the start of a
+		// sequence.
+		if reader.Buffered() == 0 {
+			continue
+		}
+		key, err := readCSI(reader)
+		if err != nil {
 			return
+		}
+		if key != 0 && !send(key) {
+			return
+		}
+	}
+}
+
+// readCSI consumes one escape sequence and returns the key it meant, or zero
+// for one this does not act on.
+//
+// A CSI runs from "[" to the first byte in 0x40–0x7E, which is what makes a
+// parameterised sequence (ESC [ 1 ; 5 A, a modified arrow) as consumable as a
+// bare one. Consuming the whole of it is the point: a sequence left half-read
+// becomes garbage in the input line.
+func readCSI(reader *bufio.Reader) (rune, error) {
+	b, err := reader.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+	if b != '[' && b != 'O' {
+		return 0, nil // an escape followed by something that is not a sequence
+	}
+	for {
+		b, err = reader.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if b >= 0x40 && b <= 0x7E {
+			switch b {
+			case 'A':
+				return keyUp, nil
+			case 'B':
+				return keyDown, nil
+			}
+			return 0, nil
 		}
 	}
 }

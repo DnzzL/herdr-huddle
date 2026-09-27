@@ -499,6 +499,7 @@ func runServe(args []string) error {
 		Instructor:     live.HerdrInstructor{},
 		Ledger:         threadLedger(ctx, state),
 		ThreadURL:      state.URL,
+		Host:           operatorLogin(ctx),
 		Status:         live.HerdrStatuser{},
 		StatusInterval: live.DefaultStatusInterval,
 		Log:            logf,
@@ -614,6 +615,32 @@ func rememberJoiner(store share.Store, key string) func(string) error {
 		_, err := store.Allow(key, login)
 		return err
 	}
+}
+
+// operatorLogin asks GitHub who is running this, so the room can name the
+// person at the pane.
+//
+// The operator is in the huddle without being connected to it — they are
+// sitting at the terminal — so without this a joiner alone in the room is told
+// they are the only one there while the operator watches over their shoulder
+// (ADR-007).
+//
+// It fails soft, to nothing. A missing or dead token already warns on the
+// ledger path a few lines below, and a room that does not name its host is the
+// behaviour this replaced, not a broken one.
+func operatorLogin(ctx context.Context) string {
+	store := auth.TokenStore{}
+	token, _, err := store.Load(ctx)
+	if err != nil || strings.TrimSpace(token) == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	login, err := (&github.Client{Token: token}).Viewer(ctx)
+	if err != nil {
+		return ""
+	}
+	return login
 }
 
 // printJoinLine is the whole instruction the collaborator receives: one line

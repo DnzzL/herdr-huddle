@@ -10,8 +10,8 @@ record.**
    ● Thinking…
 
 ── huddle ─────────────────────────────────────────────────── acme/demo#13 ──
-● working   you and @thomas
-@thomas: delivered to the agent
+● working   @thomas (host), you and @ana (typing…)
+@ana → make the gate refuse an expired token · delivered
 › also update the README▏
 ```
 
@@ -140,13 +140,24 @@ all — no pane, no partial paint, and no `observe` process ever started for the
   from the top, so someone arriving late sees a whole screen rather than the tail
   of one. Resizing repaints it. Several people can be in at once, each at their
   own size.
-- **The room**: who else is here, and what the agent is doing — `working`,
-  `idle`, or `waiting on the operator`. That last one is the thing a silent pane
-  cannot tell you.
+- **The room**: who else is here — the operator included, marked as the host,
+  because they are at the pane without being connected — and what the agent is
+  doing: `working`, `idle`, or `waiting on the operator`. That last one is the
+  thing a silent pane cannot tell you. Everyone has a colour, and it is the same
+  colour everywhere, so the room is scanned rather than read.
+- **Who is composing right now**, marked on the person: `@ana (typing…)`. It is
+  the signal that stops two people asking the agent for the same thing at once,
+  and it lapses on its own, so a client that dies mid-sentence does not type
+  forever.
 - **A line to type.** It reaches the agent immediately, wrapped as a colleague's
-  unverified message carrying their login, echoed to everyone else in the room,
-  and recorded on the pull request afterwards. A held or failed delivery is
-  reported to the room; nothing is silently dropped.
+  unverified message carrying their login, and recorded on the pull request
+  afterwards. Everyone in the room sees **what was asked for and what became of
+  it** — `@ana → make the gate refuse an expired token · delivered` — because
+  knowing that somebody said *something* is not enough to avoid saying it twice.
+  A held or failed delivery is reported the same way; nothing is silently
+  dropped.
+- **Up-arrow recalls what you sent**, so an instruction that came back `held`
+  does not have to be retyped.
 - **Ctrl-C to leave.** It ends their stream and the observer behind it, the room
   is told, and nothing else changes.
 

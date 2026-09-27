@@ -94,7 +94,10 @@ const seatBuffer = 256
 // not a convenience but the thing that makes those writes safe.
 type seat struct {
 	login string
-	out   chan []byte
+	// typingUntil is when this seat's typing claim lapses. Guarded by the
+	// room's lock, because it is only ever read while building a roster.
+	typingUntil time.Time
+	out         chan []byte
 	// closed is shut when the seat's writer has stopped, so send never blocks
 	// on a departed joiner.
 	closed chan struct{}
@@ -147,7 +150,20 @@ type room struct {
 	seats  []*seat
 	agent  string
 	thread string
+	// host is the operator's login: the person whose machine and agent this
+	// is. They are in the room without being connected to it — they are at the
+	// pane — so a joiner told "you are the only one here" while the operator
+	// watches is being told something false.
+	host string
 }
+
+// TypingTTL is how long a typing claim stands without being renewed.
+//
+// It exists because the claim is made by a client that can die mid-sentence:
+// without a lapse, a joiner who closed their laptop would appear to be typing
+// for the rest of the session, and a signal that is sometimes a ghost is worse
+// than no signal.
+const TypingTTL = 5 * time.Second
 
 func (r *room) join(s *seat) {
 	r.mu.Lock()
@@ -177,6 +193,72 @@ func (r *room) occupied() bool {
 	return len(r.seats) > 0
 }
 
+// setTyping records that somebody has started or stopped composing.
+//
+// It announces only when the *set* of typists changes, not on every renewal:
+// the client renews while the person keeps typing, and a repaint per keystroke
+// would be the room shouting.
+func (r *room) setTyping(s *seat, on bool) {
+	r.mu.Lock()
+	before := r.typistsLocked()
+	if on {
+		s.typingUntil = time.Now().Add(TypingTTL)
+	} else {
+		s.typingUntil = time.Time{}
+	}
+	changed := !sameLogins(before, r.typistsLocked())
+	r.mu.Unlock()
+	if changed {
+		r.announce()
+	}
+}
+
+// expireTyping drops claims that have lapsed, and tells the room when any did.
+//
+// The comparison is against the raw claim, not against typistsLocked: that
+// helper already hides a lapsed claim, so asking it what changed would always
+// answer "nothing" and the room would keep showing somebody typing long after
+// they stopped.
+func (r *room) expireTyping() {
+	r.mu.Lock()
+	now := time.Now()
+	lapsed := false
+	for _, s := range r.seats {
+		if !s.typingUntil.IsZero() && !s.typingUntil.After(now) {
+			s.typingUntil = time.Time{}
+			lapsed = true
+		}
+	}
+	r.mu.Unlock()
+	if lapsed {
+		r.announce()
+	}
+}
+
+// typistsLocked is who is composing right now. The caller holds mu.
+func (r *room) typistsLocked() []string {
+	now := time.Now()
+	var list []string
+	for _, s := range r.seats {
+		if !s.typingUntil.IsZero() && s.typingUntil.After(now) {
+			list = append(list, s.login)
+		}
+	}
+	return dedupe(list)
+}
+
+func sameLogins(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // setAgent records the agent's status and announces it if it moved. Returning
 // early on an unchanged status is what keeps a 2-second tick from being a
 // 2-second broadcast.
@@ -194,15 +276,25 @@ func (r *room) setAgent(status string) {
 // membersLocked is the roster as the room records carry it: one entry per
 // person, sorted, however many windows they have open. The caller holds mu.
 func (r *room) membersLocked() []string {
-	seen := make(map[string]bool, len(r.seats))
 	list := make([]string, 0, len(r.seats))
 	for _, s := range r.seats {
-		key := strings.ToLower(s.login)
+		list = append(list, s.login)
+	}
+	return dedupe(list)
+}
+
+// dedupe folds a list of logins to one entry per person, sorted — however many
+// windows they have open, and whatever case GitHub spelled them in.
+func dedupe(logins []string) []string {
+	seen := make(map[string]bool, len(logins))
+	list := make([]string, 0, len(logins))
+	for _, login := range logins {
+		key := strings.ToLower(login)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		list = append(list, s.login)
+		list = append(list, login)
 	}
 	sort.Slice(list, func(i, j int) bool { return strings.ToLower(list[i]) < strings.ToLower(list[j]) })
 	return list
@@ -212,15 +304,36 @@ func (r *room) membersLocked() []string {
 // occupant: You is what lets a joiner find itself in the roster.
 func (r *room) announce() {
 	r.mu.Lock()
-	base := Frame{Type: TypeRoom, Members: r.membersLocked(), Agent: r.agent, Thread: r.thread}
+	base := Frame{
+		Type:    TypeRoom,
+		Members: r.membersLocked(),
+		Agent:   r.agent,
+		Thread:  r.thread,
+		Host:    r.host,
+	}
+	typists := r.typistsLocked()
 	seats := append([]*seat(nil), r.seats...)
 	r.mu.Unlock()
 
 	for _, s := range seats {
 		record := base
 		record.You = s.login
+		// Nobody is told they are typing: a client knows what its own hands
+		// are doing, and echoing it back would fight the input line.
+		record.Typing = without(typists, s.login)
 		s.sendFrame(record)
 	}
+}
+
+// without drops one login from a list, case-insensitively.
+func without(logins []string, drop string) []string {
+	var kept []string
+	for _, login := range logins {
+		if !strings.EqualFold(login, drop) {
+			kept = append(kept, login)
+		}
+	}
+	return kept
 }
 
 // broadcast sends one record to everyone.
@@ -237,10 +350,14 @@ func (r *room) broadcast(f Frame) {
 // in it. A status that cannot be read becomes StatusUnknown rather than a
 // stale one: a joiner told "working" about an agent that is gone is worse off
 // than one told nothing.
+// watchAgent is the room's heartbeat: it lapses stale typing claims and keeps
+// the agent's status current, for as long as anyone is in the room.
+//
+// The two are on one ticker rather than two because they share the same
+// condition — an empty room costs nothing — and because a server with no
+// Statuser must still lapse typing, which is why the nil check below guards
+// the status call and not the loop.
 func (r *room) watchAgent(ctx context.Context, pane string, status Statuser, every time.Duration) {
-	if status == nil || pane == "" {
-		return
-	}
 	if every <= 0 {
 		every = DefaultStatusInterval
 	}
@@ -252,6 +369,10 @@ func (r *room) watchAgent(ctx context.Context, pane string, status Statuser, eve
 			return
 		case <-ticker.C:
 			if !r.occupied() {
+				continue
+			}
+			r.expireTyping()
+			if status == nil || pane == "" {
 				continue
 			}
 			got, err := status.Status(ctx, pane)

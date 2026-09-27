@@ -57,7 +57,7 @@ func TestChromeOccupiesOnlyTheBottomRows(t *testing.T) {
 	view := View{
 		Cols: 60, Rows: 24,
 		Room:  Room{You: "ana", Members: []string{"ana", "bo"}, Agent: herdr.StatusWorking, Thread: "https://github.com/acme/demo/pull/13"},
-		Event: "@bo joined",
+		Event: line{}.add(dim, "@bo joined"),
 		Input: "make it faster",
 	}
 	drawn := rows(t, view.Chrome())
@@ -80,7 +80,7 @@ func TestChromeSaysWhoIsHereAndWhatTheAgentIsDoing(t *testing.T) {
 	view := View{
 		Cols: 70, Rows: 24,
 		Room:  Room{You: "ana", Members: []string{"ana", "bo"}, Agent: herdr.StatusBlocked, Thread: "https://github.com/acme/demo/pull/13"},
-		Event: "@bo: delivered to the agent",
+		Event: line{}.add(dim, "@bo → rename the package · delivered"),
 		Input: "make it faster",
 	}
 	drawn := rows(t, view.Chrome())
@@ -90,7 +90,7 @@ func TestChromeSaysWhoIsHereAndWhatTheAgentIsDoing(t *testing.T) {
 		"acme/demo#13",            // the record is one glance away
 		"waiting on the operator", // blocked, in words a person reads
 		"@bo",                     // who else is here
-		"@bo: delivered to the agent",
+		"@bo → rename the package · delivered",
 		"make it faster", // what you have typed so far
 	} {
 		if !strings.Contains(all, want) {
@@ -111,12 +111,12 @@ func TestRosterWording(t *testing.T) {
 	}{
 		{"alone", "ana", []string{"ana"}, "you are the only one here"},
 		{"one other", "ana", []string{"ana", "bo"}, "you and @bo"},
-		{"several", "ana", []string{"ana", "bo", "cy"}, "you and @bo, @cy"},
+		{"several", "ana", []string{"ana", "bo", "cy"}, "you, @bo and @cy"},
 		{"before the roster arrives", "", nil, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := View{Room: Room{You: c.you, Members: c.members}}.roster()
+			got := View{Room: Room{You: c.you, Members: c.members}}.roster().plain()
 			if got != c.want {
 				t.Errorf("roster = %q, want %q", got, c.want)
 			}
@@ -130,7 +130,7 @@ func TestChromeFitsANarrowTerminal(t *testing.T) {
 	view := View{
 		Cols: 24, Rows: 12,
 		Room:  Room{You: "ana", Members: []string{"ana", "bonaventure", "cyrille"}, Agent: herdr.StatusBlocked, Thread: "https://github.com/acme/demo/pull/13"},
-		Event: "@bonaventure: not delivered: the agent is waiting on its operator",
+		Event: line{}.add(dim, "@bonaventure → ship it · not delivered: the agent is waiting on its operator"),
 		Input: strings.Repeat("x", 200),
 	}
 	for row, text := range rows(t, view.Chrome()) {
@@ -162,12 +162,12 @@ func TestShortThread(t *testing.T) {
 // push the pane up by a row that never comes back.
 func TestALongInputKeepsItsEndVisible(t *testing.T) {
 	view := View{Cols: 20, Rows: 10, Input: "abcdefghijklmnopqrstuvwxyz"}
-	line := sgr.ReplaceAllString(view.prompt(view.Cols), "")
-	if !strings.HasSuffix(line, "z") {
-		t.Errorf("prompt = %q, want the end of what was typed", line)
+	shown := view.prompt(view.Cols).plain()
+	if !strings.HasSuffix(shown, "z") {
+		t.Errorf("prompt = %q, want the end of what was typed", shown)
 	}
-	if len([]rune(line)) > view.Cols {
-		t.Errorf("prompt is %d columns wide, want at most %d", len([]rune(line)), view.Cols)
+	if len([]rune(shown)) > view.Cols {
+		t.Errorf("prompt is %d columns wide, want at most %d", len([]rune(shown)), view.Cols)
 	}
 }
 
@@ -181,6 +181,99 @@ func TestDropWord(t *testing.T) {
 	for in, want := range cases {
 		if got := string(dropWord([]rune(in))); got != want {
 			t.Errorf("dropWord(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The operator is in the room without being connected to it — they are sitting
+// at the pane. A joiner told "you are the only one here" while the operator
+// watches over their shoulder is being told something false.
+func TestRosterNamesTheHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		you, host string
+		members   []string
+		want      string
+	}{
+		{"alone with the operator watching", "ana", "thomas", []string{"ana"}, "@thomas (host) and you"},
+		{"a full room", "ana", "thomas", []string{"ana", "bo"}, "@thomas (host), you and @bo"},
+		{"the operator joined their own huddle", "thomas", "thomas", []string{"thomas"}, "you (host)"},
+		{"no host known", "ana", "", []string{"ana"}, "you are the only one here"},
+		{"the host is also a joiner, listed once", "ana", "thomas", []string{"ana", "thomas"}, "@thomas (host) and you"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := View{Room: Room{You: c.you, Host: c.host, Members: c.members}}.roster().plain()
+			if got != c.want {
+				t.Errorf("roster = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Typing is a fact about a person, so it is drawn on the person. Putting it on
+// the event line instead would mean somebody else composing hides the
+// confirmation that your own instruction was delivered — which is the one
+// thing you are waiting to read.
+func TestTypingIsShownOnThePerson(t *testing.T) {
+	view := View{
+		Cols: 70, Rows: 24,
+		Room:  Room{You: "ana", Host: "thomas", Members: []string{"ana", "bo"}},
+		Event: line{}.add(dim, "@bo → rename the package · delivered"),
+	}
+	if got := view.roster().plain(); got != "@thomas (host), you and @bo" {
+		t.Errorf("roster = %q", got)
+	}
+
+	view.Room.Typing = []string{"bo"}
+	if got := view.roster().plain(); got != "@thomas (host), you and @bo (typing…)" {
+		t.Errorf("roster = %q, want @bo marked as typing", got)
+	}
+	// And the event line is untouched: what was delivered stays readable.
+	if got := view.event().plain(); got != "@bo → rename the package · delivered" {
+		t.Errorf("event = %q, want somebody typing not to hide it", got)
+	}
+
+	// The operator typing keeps being the operator.
+	view.Room.Typing = []string{"thomas"}
+	if got := view.roster().plain(); got != "@thomas (host, typing…), you and @bo" {
+		t.Errorf("roster = %q, want the host marked as both", got)
+	}
+}
+
+// A person is one colour everywhere — roster, typing line, and the record of
+// what they asked for — or the room is read word by word instead of scanned.
+func TestPersonColourIsStable(t *testing.T) {
+	first := personColour("ana")
+	if first != personColour("ana") {
+		t.Error("the same login must always get the same colour")
+	}
+	// GitHub's casing is not a different person.
+	if personColour("Ana") != first {
+		t.Errorf("case changed the colour: %q vs %q", personColour("Ana"), first)
+	}
+	for _, colour := range []string{red, yellow} {
+		for _, login := range []string{"ana", "bo", "cy", "thomas", "dee", "eve", "fay", "gil"} {
+			if personColour(login) == colour {
+				t.Errorf("@%s is coloured like an agent state, which reads as an alarm", login)
+			}
+		}
+	}
+}
+
+// Colour must never survive a truncation: a styled string cut mid-escape
+// leaves the terminal painting in a colour nobody asked for, for good.
+func TestTruncationNeverCutsAnEscape(t *testing.T) {
+	row := line{}.add(red, "aaaaaaaaaa").add(green, "bbbbbbbbbb").add(blue, "cccccccccc")
+	for n := 1; n <= 35; n++ {
+		out := row.render(n)
+		if plain := sgr.ReplaceAllString(out, ""); len([]rune(plain)) > n {
+			t.Errorf("render(%d) is %d columns wide: %q", n, len([]rune(plain)), plain)
+		}
+		if strings.Count(out, "\x1b[") != strings.Count(out, reset)*2 {
+			// Every style opened is a style closed: one opener and one reset
+			// per painted span, and \x1b[ counts both.
+			t.Errorf("render(%d) leaves a style open: %q", n, out)
 		}
 	}
 }
