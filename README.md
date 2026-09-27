@@ -12,7 +12,7 @@ record.**
 ── huddle ─────────────────────────────────────────────────── acme/demo#13 ──
 ● working   @thomas (host), you and @ana (typing…)
 @ana → make the gate refuse an expired token · delivered
-› also update the README▏
+agent › also update the README▏
 ```
 
 You run a coding agent in a Herdr pane. `herdr-huddle` turns it into a room: one
@@ -134,6 +134,28 @@ all — no pane, no partial paint, and no `observe` process ever started for the
 | `--open` | Anyone with the link and a GitHub identity is in, for as long as `serve` runs. Nothing is written. |
 | `--closed` | The allowlist or nothing, and nobody is asked — for a `serve` nobody is sitting in front of. |
 
+The question rings a bell and raises a Herdr notification, not just a line in
+this log — you are watching your agent, not the terminal `serve` prints into.
+Questions are asked one at a time in the order they arrived, and one about
+somebody who has since disconnected is dropped rather than left on your screen.
+
+### Letting somebody in is not letting them drive
+
+`--moderated` splits those into two decisions. Every instruction is put to you,
+with the words in front of you, before the agent sees it:
+
+```
+herdr-huddle: @ana wants to send the agent:
+
+    drop the users table
+
+  send it? [y/N] n
+```
+
+The joiner sees `waiting for the operator to approve it` while you decide — not
+silence, which reads as a dropped instruction — and the whole room sees the
+answer. Use it for anyone you would not hand your shell to.
+
 ### What the joiner gets
 
 - **Their own stream**, rendered at *their* terminal's size and freshly painted
@@ -149,7 +171,13 @@ all — no pane, no partial paint, and no `observe` process ever started for the
   the signal that stops two people asking the agent for the same thing at once,
   and it lapses on its own, so a client that dies mid-sentence does not type
   forever.
-- **A line to type.** It reaches the agent immediately, wrapped as a colleague's
+- **Two places to type.** `Ctrl-T` switches the input line between the agent and
+  the room, and the line says which — `agent ›` or `room ›`. Talking to the room
+  reaches the people and never the agent, so you can say "wait, don't touch the
+  migration" to a colleague without the agent doing something about it. Room
+  messages are **not** posted to the pull request: the thread is the record of
+  the agent's work, and one full of "one sec" is a record of nothing.
+- **A line to the agent** reaches it immediately, wrapped as a colleague's
   unverified message carrying their login, and recorded on the pull request
   afterwards. Everyone in the room sees **what was asked for and what became of
   it** — `@ana → make the gate refuse an expired token · delivered` — because
@@ -158,6 +186,11 @@ all — no pane, no partial paint, and no `observe` process ever started for the
   dropped.
 - **Up-arrow recalls what you sent**, so an instruction that came back `held`
   does not have to be retyped.
+- **A huddle that survives its tunnel.** A dropped connection is retried, from
+  half a second out to fifteen, with the terminal kept and the reason on screen.
+  It gives up on the only two things retrying cannot fix: you left, or you were
+  turned away. A GitHub hiccup or an operator who stepped away from the knock is
+  retried like any other blip. (This is the TUI; piped output does not retry.)
 - **Ctrl-C to leave.** It ends their stream and the observer behind it, the room
   is told, and nothing else changes.
 
@@ -196,7 +229,7 @@ herdr-huddle auth status
 herdr-huddle auth logout
 herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
 herdr-huddle poll [--once] [--interval 10s]
-herdr-huddle serve [--pane id] [--open | --closed] [--no-tunnel] [--addr host:port] [--cols n] [--rows n]
+herdr-huddle serve [--pane id] [--open | --closed] [--moderated] [--no-tunnel] [--addr host:port] [--cols n] [--rows n]
 herdr-huddle join [address] [--addr 127.0.0.1:8787]
 ```
 
@@ -278,8 +311,16 @@ ADR-004.
   line. The status line saying `waiting on the operator` is what tells you the
   agent is at a prompt.
 - **Nothing starts the stream for you.** `serve` is a foreground command you run
-  and stop; the plugin's startup hook still starts only the poller. A dropped
-  tunnel ends the room, and nothing redials.
+  and stop; the plugin's startup hook still starts only the poller.
+- **Reconnect survives a blip, not a restart.** If *you* restart `serve`, the
+  quick tunnel gets a new URL, so joiners back off against an address that no
+  longer exists. Send them the new line.
+- **Room chat has no history.** It lands on the one event line and is gone, so a
+  message you scrolled past is lost. Nothing rate-limits it either, beyond a
+  2000-byte cap per message.
+- **Want an alert when the agent needs you?** That is Herdr's, not ours: turn on
+  `[ui] toast` and `[ui] sound` in `config.toml` and it notifies on every agent
+  state change, blocked included, with per-agent sound overrides.
 - **Typing into the pane directly stays discouraged.** The agent would record it
   as the operator's own words, which costs the record its attribution.
 - **The transcript comes from the agent's own session file**, read by an adapter

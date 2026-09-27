@@ -277,3 +277,57 @@ func TestTruncationNeverCutsAnEscape(t *testing.T) {
 		}
 	}
 }
+
+// The expensive mistake in a room where one input line feeds two destinations
+// is a silent one: telling the agent to do something when you meant to say
+// "hang on" to a colleague. So the destination is a word on the line you are
+// typing into, never a colour alone and never absent.
+func TestThePromptSaysWhereTheLineIsGoing(t *testing.T) {
+	view := View{Cols: 60, Rows: 24, Input: "ship it"}
+
+	agent := view.prompt(view.Cols).plain()
+	if !strings.HasPrefix(agent, "agent › ") {
+		t.Errorf("prompt = %q, want it to say the line goes to the agent", agent)
+	}
+
+	view.Mode = toRoom
+	room := view.prompt(view.Cols).plain()
+	if !strings.HasPrefix(room, "room › ") {
+		t.Errorf("prompt = %q, want it to say the line goes to the room", room)
+	}
+	if !strings.HasSuffix(room, "ship it") {
+		t.Errorf("prompt = %q, want what was typed", room)
+	}
+}
+
+// The cursor has to sit after the text in either mode, or the terminal looks
+// like it has lost it.
+func TestPromptWidthFollowsTheMode(t *testing.T) {
+	for _, c := range []struct {
+		mode  mode
+		input string
+	}{
+		{toAgent, ""},
+		{toAgent, "ship it"},
+		{toRoom, ""},
+		{toRoom, "hang on"},
+	} {
+		view := View{Cols: 60, Rows: 24, Input: c.input, Mode: c.mode}
+		want := len([]rune(view.prompt(view.Cols).plain())) + 1
+		if got := promptWidth(c.input, c.mode, view.Cols); got != want {
+			t.Errorf("mode %v input %q: cursor at column %d, want %d (just past the text)",
+				c.mode, c.input, got, want)
+		}
+	}
+}
+
+// Both modes must survive a narrow window without wrapping the chrome into the
+// pane.
+func TestThePromptFitsInEitherMode(t *testing.T) {
+	for _, m := range []mode{toAgent, toRoom} {
+		view := View{Cols: 24, Rows: 12, Mode: m, Input: strings.Repeat("x", 200)}
+		if got := len([]rune(view.prompt(view.Cols).plain())); got > view.Cols {
+			t.Errorf("mode %v: prompt is %d columns wide, want at most %d", m, got, view.Cols)
+		}
+	}
+}

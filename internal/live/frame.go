@@ -47,6 +47,11 @@ const (
 	// as part of the room. It is the one signal that stops two people asking
 	// the agent for the same thing at once.
 	TypeTyping = "typing"
+	// TypeChat is a message to the people in the room and to nobody else.
+	// Client-to-server as a claim about oneself; server-to-client attributed
+	// to the login the gate proved. It never reaches the agent — that is the
+	// entire reason it exists.
+	TypeChat = "chat"
 )
 
 // EncodingANSI is the only payload encoding Herdr sends, and the only one worth
@@ -111,6 +116,11 @@ type Frame struct {
 	Typing []string `json:"typing,omitempty"`
 	// On is the claim a typing record carries: composing, or stopped.
 	On bool `json:"on,omitempty"`
+	// Fatal marks an error record that retrying cannot fix — a refusal at the
+	// gate, rather than a stream that broke. A client that reconnects needs
+	// the difference: redialling a refusal is a loop that hammers the door and
+	// never opens it.
+	Fatal bool `json:"fatal,omitempty"`
 }
 
 // ParseFrame decodes one record.
@@ -145,7 +155,7 @@ func ParseFrame(line []byte) (Frame, error) {
 // a client does.
 func (f Frame) Known() bool {
 	switch f.Type {
-	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid, TypeRoom, TypeResize, TypeTyping:
+	case TypeFrame, TypeClosed, TypeError, TypeHello, TypeSay, TypeSaid, TypeRoom, TypeResize, TypeTyping, TypeChat:
 		return true
 	}
 	return false
@@ -167,8 +177,14 @@ func (f Frame) Data() ([]byte, error) {
 }
 
 // ErrorRecord builds the one record this package adds to the stream.
-func ErrorRecord(err error) []byte {
-	line, marshalErr := json.Marshal(Frame{Type: TypeError, Message: err.Error()})
+func ErrorRecord(err error) []byte { return errorRecord(err, false) }
+
+// FatalRecord is an error a reconnect cannot fix: the door was closed to this
+// person, and dialling again would only knock again.
+func FatalRecord(err error) []byte { return errorRecord(err, true) }
+
+func errorRecord(err error, fatal bool) []byte {
+	line, marshalErr := json.Marshal(Frame{Type: TypeError, Message: err.Error(), Fatal: fatal})
 	if marshalErr != nil {
 		// Impossible for this struct, and a stream must end one way or another.
 		return []byte(`{"type":"error","message":"live: the stream failed"}` + "\n")

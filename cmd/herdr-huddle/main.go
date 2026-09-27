@@ -14,6 +14,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -105,7 +107,7 @@ Usage:
   herdr-huddle auth logout
   herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
   herdr-huddle poll [--once] [--interval 10s]
-  herdr-huddle serve [--pane id] [--open | --closed] [--no-tunnel] [--addr host:port]
+  herdr-huddle serve [--pane id] [--open|--closed] [--moderated] [--no-tunnel] [--addr host:port]
   herdr-huddle join [address] [--addr 127.0.0.1:8787]
 
 Auth:
@@ -153,6 +155,9 @@ Serve and join:
                          the admission lasts only as long as serve does.
            --closed      the allowlist or nothing, and nobody is asked — for a
                          serve nobody is sitting in front of.
+           --moderated   put every instruction to you, with the words in front
+                         of you, before the agent sees it. Letting somebody in
+                         and letting them drive stop being one decision.
            By default the door knocks: somebody who is not on the allowlist
            yet proves who they are on GitHub, you are asked here, and one
            keypress lets them in for good — their pull-request comments
@@ -170,8 +175,12 @@ Serve and join:
            browser when there is none. What you type is delivered to the agent
            immediately and recorded on the thread afterwards; a held or failed
            delivery is reported in the room rather than silently dropped.
-           Ctrl-C leaves. Piped somewhere that is not a terminal, it writes the
-           pane's bytes out plainly instead.
+           Ctrl-T switches the input line between the agent and the room:
+           talking to the room reaches the people in it and never the agent,
+           and is not posted to the thread. Up-arrow recalls what you sent. A
+           dropped connection is retried with a backoff until you give up with
+           Ctrl-C. Piped somewhere that is not a terminal, it writes the pane's
+           bytes out plainly instead.
 
 A share is the whole of it: share opens the thread, serve opens the huddle on
 it, and join is everyone else's window in. The pull request is the artifact the
@@ -463,6 +472,7 @@ func runServe(args []string) error {
 	noTunnel := fs.Bool("no-tunnel", false, "do not start a tunnel; serve on this address only")
 	open := fs.Bool("open", false, "let anyone with a GitHub identity in, without asking")
 	closed := fs.Bool("closed", false, "the allowlist or nothing: never ask, never knock")
+	moderated := fs.Bool("moderated", false, "approve every instruction before it reaches the agent")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -490,16 +500,22 @@ func runServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
 	}
 
+	at := &console{in: bufio.NewReader(os.Stdin), out: os.Stderr, notify: notifier(ctx, logf)}
+	// Reading starts now, so that anything typed before a question was asked
+	// is recognisably older than it.
+	at.listen()
+
 	server := &live.Server{
 		Pane:           state.Origin.PaneID,
 		Cols:           *cols,
 		Rows:           *rows,
 		Observe:        &live.HerdrObserver{},
-		Gate:           doorFor(shareStore(), state, *open, *closed, logf),
+		Gate:           doorFor(shareStore(), state, *open, *closed, at, logf),
 		Instructor:     live.HerdrInstructor{},
 		Ledger:         threadLedger(ctx, state),
 		ThreadURL:      state.URL,
 		Host:           operatorLogin(ctx),
+		Moderate:       moderatorFor(*moderated, at),
 		Status:         live.HerdrStatuser{},
 		StatusInterval: live.DefaultStatusInterval,
 		Log:            logf,
@@ -507,6 +523,9 @@ func runServe(args []string) error {
 	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s for %s — the record is %s\n",
 		state.Origin.PaneID, state.Repo, state.URL)
 	fmt.Fprintf(os.Stderr, "herdr-huddle: the door is %s\n", doorLabel(*open, *closed))
+	if *moderated {
+		fmt.Fprintf(os.Stderr, "herdr-huddle: moderated — every instruction is put to you before the agent sees it\n")
+	}
 
 	switch {
 	case *noTunnel:
@@ -560,7 +579,7 @@ func threadLedger(ctx context.Context, state share.State) *thread.InstructionLed
 // actual decision by the operator, taken with the asker's proven login in
 // front of them. --open trades the decision for convenience; --closed keeps
 // today's behaviour for an unattended serve.
-func doorFor(store share.Store, state share.State, open, closed bool, logf func(string, ...any)) *live.Gate {
+func doorFor(store share.Store, state share.State, open, closed bool, at *console, logf func(string, ...any)) *live.Gate {
 	gate := &live.Gate{
 		Verify:    live.GitHubVerifier{},
 		Allowlist: state.Allowlist,
@@ -569,9 +588,18 @@ func doorFor(store share.Store, state share.State, open, closed bool, logf func(
 		Log:       logf,
 	}
 	if !open && !closed {
-		gate.Admit = &terminalApprover{in: bufio.NewReader(os.Stdin), out: os.Stderr}
+		gate.Admit = at
 	}
 	return gate
+}
+
+// moderatorFor returns the thing that approves instructions, or nil for the
+// default — anyone the door admitted steers the agent directly.
+func moderatorFor(on bool, at *console) live.Moderator {
+	if !on {
+		return nil
+	}
+	return live.ModeratorFunc(at.ApproveInstruction)
 }
 
 func doorLabel(open, closed bool) string {
@@ -585,27 +613,169 @@ func doorLabel(open, closed bool) string {
 	}
 }
 
-// terminalApprover is the operator answering their own door.
+// console is the operator answering questions at their own terminal.
 //
-// It reads the operator's terminal, which is the one place their answer can be
-// trusted to come from. A stdin that is closed or not a terminal — an
-// unattended serve — returns an error, and the gate turns that into a refusal:
-// nobody is let in because nobody could be asked.
-type terminalApprover struct {
+// There is one of these and not two, although two things ask questions — the
+// door and the moderator — because both read the same stdin. Two readers on
+// one terminal interleave their prompts and race for the answer.
+//
+// Three properties it has to have, and each cost a bug to learn:
+//
+//   - **One question at a time, in arrival order.** The turn is a channel and
+//     not a mutex, because Go serves blocked channel receives first-come-first-
+//     served and makes no such promise for a mutex. With two people waiting,
+//     the operator should be asked about the one who asked first.
+//   - **A question can be abandoned.** Reading stdin blocks, so a joiner who
+//     sends an instruction and disconnects would otherwise leave the operator
+//     staring at a prompt about somebody who is gone — while holding the turn,
+//     so nobody else can be admitted either. Every wait watches its context.
+//   - **An answer answers the question in front of it.** A single reader
+//     goroutine owns stdin, and anything typed before a question was asked is
+//     discarded rather than applied to it. Otherwise an idle "y" sitting in the
+//     buffer silently admits the next person who knocks.
+type console struct {
 	in  *bufio.Reader
 	out io.Writer
+	// notify raises the question on the screen the operator is actually
+	// looking at, which is their agent and not this log.
+	notify func(title, body string)
+
+	start   sync.Once
+	turn    chan struct{}
+	answers chan answer
+	waiting atomic.Int64
 }
 
-func (t *terminalApprover) Approve(_ context.Context, login string) (bool, error) {
-	fmt.Fprintf(t.out, "\nherdr-huddle: @%s is at the door (github.com/%s).\n  let them into the huddle? [y/N] ", login, login)
-	line, err := t.in.ReadString('\n')
-	if err != nil {
-		if strings.TrimSpace(line) == "" {
-			return false, fmt.Errorf("nothing to read the answer from: %w", err)
+// answer is a line the operator typed, and when they typed it.
+//
+// The time is the whole point. Draining the channel before asking is not
+// enough: a line already read and waiting to be handed over is in flight, not
+// in the channel, so it survives the drain and answers the next question. An
+// answer older than the question was never an answer to it.
+type answer struct {
+	text string
+	at   time.Time
+}
+
+// listen starts reading the terminal. It is called when `serve` starts, not
+// when the first question is asked — otherwise "typed before the question" and
+// "typed after it" are the same thing, because nothing was reading before.
+func (c *console) listen() {
+	c.start.Do(func() {
+		c.turn = make(chan struct{}, 1)
+		c.turn <- struct{}{}
+		c.answers = make(chan answer)
+		go func() {
+			defer close(c.answers)
+			for {
+				line, err := c.in.ReadString('\n')
+				if line != "" {
+					c.answers <- answer{text: line, at: time.Now()}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	})
+}
+
+// Approve answers the door.
+func (c *console) Approve(ctx context.Context, login string) (bool, error) {
+	return c.put(ctx,
+		"@"+login+" is at the door", "let them into the huddle?",
+		fmt.Sprintf("@%s is at the door (github.com/%s).\n  let them into the huddle?", login, login))
+}
+
+// ApproveInstruction answers for one instruction on a moderated share.
+//
+// The words are shown in full before the question, because the question is
+// about the words: "let @ana send something" is not a decision anybody can
+// make.
+func (c *console) ApproveInstruction(ctx context.Context, login, text string) (bool, error) {
+	return c.put(ctx,
+		"@"+login+" wants to steer the agent", firstLine(text),
+		fmt.Sprintf("@%s wants to send the agent:\n\n    %s\n\n  send it?", login, indent(text)))
+}
+
+// put waits its turn, asks, and reads one answer. Anything but yes is no.
+func (c *console) put(ctx context.Context, title, body, question string) (bool, error) {
+	c.listen()
+
+	behind := c.waiting.Add(1) - 1
+	defer c.waiting.Add(-1)
+
+	select {
+	case <-c.turn:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	defer func() { c.turn <- struct{}{} }()
+
+	if c.notify != nil {
+		c.notify(title, body)
+	}
+
+	queue := ""
+	if behind > 0 {
+		queue = fmt.Sprintf(" (%d more waiting)", behind)
+	}
+	// The bell is for the operator who is looking at their agent rather than
+	// at this terminal — the same reason the notification exists.
+	asked := time.Now()
+	fmt.Fprintf(c.out, "\a\nherdr-huddle: %s%s [y/N] ", question, queue)
+
+	for {
+		select {
+		case got, ok := <-c.answers:
+			if !ok {
+				return false, errors.New("nothing to read the answer from: the terminal is closed")
+			}
+			if got.at.Before(asked) {
+				continue // typed before the question; it answered something else
+			}
+			reply := strings.ToLower(strings.TrimSpace(got.text))
+			return reply == "y" || reply == "yes", nil
+		case <-ctx.Done():
+			fmt.Fprintf(c.out, "\nherdr-huddle: never mind — they are gone\n")
+			return false, ctx.Err()
 		}
 	}
-	answer := strings.ToLower(strings.TrimSpace(line))
-	return answer == "y" || answer == "yes", nil
+}
+
+// firstLine keeps a notification body to something a toast can hold.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i] + " …"
+	}
+	if len(s) > 140 {
+		s = s[:139] + "…"
+	}
+	return s
+}
+
+// indent lays a multi-line instruction out under the question so it reads as
+// a quotation rather than as more of the prompt.
+func indent(s string) string {
+	return strings.ReplaceAll(strings.TrimSpace(s), "\n", "\n    ")
+}
+
+// notifier raises a notification through Herdr, which already owns that
+// surface for agent state changes — one place to configure, one place they
+// appear. A failure is swallowed: a missing toast must never stop the question
+// being asked.
+func notifier(ctx context.Context, logf func(string, ...any)) func(title, body string) {
+	client := &herdr.Client{}
+	return func(title, body string) {
+		notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := client.Notify(notifyCtx, "herdr-huddle: "+title, body, herdr.SoundRequest); err != nil {
+			// Not fatal — the question is still on this terminal and the bell
+			// still rang — but silence here would hide a notification path
+			// that has been broken all session.
+			logf("could not raise a notification: %v", err)
+		}
+	}
 }
 
 // rememberJoiner writes an admitted login onto the share, so the poller
@@ -728,23 +898,12 @@ func runJoin(args []string) error {
 		return err
 	}
 
-	// The viewport is asked for before the first frame, because the server
-	// starts this joiner's observer at whatever size the hello carried
-	// (ADR-007). Getting it afterwards would cost a restart on arrival.
-	var opts []live.Option
-	interactive := tui.IsTerminal(os.Stdout) && tui.IsTerminal(os.Stdin)
-	if interactive {
-		cols, rows := tui.Size(os.Stdout)
-		opts = append(opts, live.WithViewport(cols, tui.PaneRows(rows)))
-	}
-
-	session, err := live.Dial(ctx, endpoint, token, opts...)
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-
-	if !interactive {
+	if !tui.IsTerminal(os.Stdout) || !tui.IsTerminal(os.Stdin) {
+		session, err := live.Dial(ctx, endpoint, token)
+		if err != nil {
+			return err
+		}
+		defer session.Close()
 		fmt.Fprintf(os.Stderr, "herdr-huddle: joined %s (Ctrl-C to leave)\n", endpoint)
 		return joinPlainly(ctx, session)
 	}
@@ -752,9 +911,22 @@ func runJoin(args []string) error {
 	app := &tui.App{
 		In:   os.Stdin,
 		Out:  os.Stdout,
-		Hint: "type a line and press enter to send it to the agent · Ctrl-C to leave",
+		Hint: "enter sends · ctrl-t switches between the agent and the room · ctrl-c leaves",
 	}
-	return app.Run(ctx, session)
+	// A dialer rather than a connection: a dropped tunnel is a reconnect, not
+	// the end of the huddle, and every redial reads the window size afresh
+	// because it may have changed while we were away.
+	return app.Run(ctx, func(ctx context.Context) (tui.Client, error) {
+		cols, rows := tui.Size(os.Stdout)
+		// The viewport is asked for before the first frame, because the server
+		// starts this joiner's observer at whatever size the hello carried
+		// (ADR-007). Getting it afterwards would cost a restart on arrival.
+		session, err := live.Dial(ctx, endpoint, token, live.WithViewport(cols, tui.PaneRows(rows)))
+		if err != nil {
+			return nil, err
+		}
+		return session, nil
+	})
 }
 
 // joinPlainly is the fallback for a join whose output is not a terminal: the

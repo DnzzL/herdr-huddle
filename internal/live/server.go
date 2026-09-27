@@ -88,6 +88,11 @@ type Server struct {
 	// alone in the room is told they are alone, which is false while the
 	// operator is watching (ADR-007).
 	Host string
+	// Moderate decides whether a joiner's instruction reaches the agent.
+	// Optional: without it, anyone the gate admitted steers directly, which
+	// is the default. With it, admitting somebody to the room and letting
+	// them drive the agent stop being the same decision.
+	Moderate Moderator
 	// Status reports what the agent is doing, for the room. Optional: without
 	// it the room simply never says.
 	Status Statuser
@@ -357,7 +362,15 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 
 	login, reader, hello, err := s.authorize(ctx, conn)
 	if err != nil {
-		s.fail(conn, err)
+		// Only a person the gate turned away is told not to come back. A
+		// reconnect loop that redials a closed door knocks forever — but one
+		// that gives up because GitHub was briefly unreachable ends a huddle
+		// over a blip, which is the worse failure of the two.
+		if NotAllowed(err) {
+			_, _ = conn.Write(FatalRecord(err))
+		} else {
+			s.fail(conn, err)
+		}
 		s.logf("joiner %s: %v", conn.RemoteAddr(), err)
 		return
 	}
@@ -396,7 +409,21 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			}
 			switch record.Type {
 			case TypeSay:
-				s.speak(ctx, st, login, record.Text)
+				if s.Moderate == nil {
+					// In order, on this goroutine: two instructions from one
+					// person must reach the agent in the order they were
+					// typed.
+					s.speak(ctx, st, login, record.Text)
+					break
+				}
+				// Moderated, so the answer is a person's and may take a
+				// minute. Off this goroutine, or a joiner waiting for approval
+				// could not even chat to ask what the hold-up is. Ordering
+				// then belongs to the operator, which is the point of
+				// moderating.
+				go s.speak(ctx, st, login, record.Text)
+			case TypeChat:
+				s.chat(login, record.Text)
 			case TypeResize:
 				view.set(clampViewport(record.Width, record.Height, s.Cols, s.Rows))
 			case TypeTyping:
@@ -601,6 +628,27 @@ func (s *Server) speak(ctx context.Context, st *seat, login, text string) {
 	// Sending ends the sentence: leaving the claim standing would show the
 	// author as still typing what they have already sent.
 	s.room().setTyping(st, false)
+
+	if s.Moderate != nil {
+		// The room is told it is waiting, not that it failed: the answer is
+		// coming, from a person, and silence in the meantime reads as a
+		// dropped instruction.
+		s.room().broadcast(Frame{Type: TypeSaid, Status: StatusQueued, Author: login, Text: text})
+		ok, err := s.Moderate.Approve(ctx, login, text)
+		switch {
+		case err != nil:
+			s.logf("could not put @%s's instruction to the operator: %v", login, err)
+			s.room().broadcast(Frame{Type: TypeSaid, Status: StatusFailed,
+				Reason: "nobody could be asked to approve it", Author: login, Text: text})
+			return
+		case !ok:
+			s.logf("operator refused @%s's instruction", login)
+			s.room().broadcast(Frame{Type: TypeSaid, Status: StatusRefused,
+				Reason: "the operator did not send it", Author: login, Text: text})
+			return
+		}
+	}
+
 	instruction := thread.Instruction{Author: login, Text: text, URL: s.ThreadURL}
 	if err := s.Instructor.Deliver(ctx, s.Pane, instruction.Prompt()); err != nil {
 		status, reason := deliveryFailure(err)
@@ -626,6 +674,30 @@ func (s *Server) speak(ctx context.Context, st *seat, login, text string) {
 		}
 	}()
 }
+
+// chat carries a message to the people in the room and to nobody else.
+//
+// It is the primitive the huddle was missing: every line a joiner typed went
+// to the agent, so two collaborators could not say "wait, don't do that" to
+// each other without the agent doing something about it. Nothing here touches
+// the Instructor, and nothing here reaches the thread — this is side-talk, and
+// a pull request full of "one sec" is not a record of anything (ADR-007).
+func (s *Server) chat(login, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	// Cut on runes: slicing bytes lands mid-character and puts a replacement
+	// glyph on every screen in the room.
+	if runes := []rune(text); len(runes) > maxChatRunes {
+		text = string(runes[:maxChatRunes])
+	}
+	s.room().broadcast(Frame{Type: TypeChat, Author: login, Text: text})
+}
+
+// maxChatRunes bounds one message. The room is four rows; anything longer is
+// not a message, it is a paste.
+const maxChatRunes = 2000
 
 // failSeat tells a joiner why the stream stopped, through their own writer.
 func (s *Server) failSeat(st *seat, err error) { st.send(ErrorRecord(err)) }

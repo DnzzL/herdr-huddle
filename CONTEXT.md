@@ -40,6 +40,14 @@ The role of the client a collaborator runs to join a live share — it renders t
 
 _Avoid_: watch (a read-only word for a client that can steer)
 
+**Chat**:
+A message from one person in the huddle to the others, carried by the room and never by the agent. It is side-talk — the coordination around the work, not the work — so it is deliberately absent from the ledger. The thing that makes two people in one room able to disagree without the agent acting on the disagreement.
+
+_Avoid_: message (too general — a say is also a message), comment (that is the thread's word)
+
+**Moderator**:
+The operator deciding, per instruction, whether a collaborator's words reach the agent. Distinct from the door, which decides whether somebody is in the room at all: being admitted and being allowed to steer are two decisions, and `--moderated` is what separates them.
+
 **Ledger**:
 GitHub. The canonical, append-only record of every turn and every steering comment. The transport must never wait for it; it must eventually hold everything.
 

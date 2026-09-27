@@ -86,6 +86,22 @@ type Gate struct {
 // ErrNoToken is refused before GitHub is contacted at all.
 var ErrNoToken = errors.New("live: no GitHub token was presented")
 
+// notAllowed marks the gate having identified somebody and decided against
+// them. It is the *only* gate failure a client must not retry.
+//
+// The distinction is load-bearing for reconnect (ADR-008): GitHub being
+// unreachable, an operator who stepped away from the knock, a share with no
+// allowlist yet — all of those may work on the next attempt, and treating them
+// as refusals would end a huddle over a network blip. Being turned away is the
+// one that will not change by asking again.
+type notAllowed struct{ error }
+
+// NotAllowed reports whether an error is the gate turning a known person away.
+func NotAllowed(err error) bool {
+	var turned notAllowed
+	return errors.As(err, &turned)
+}
+
 // Authorize checks a joiner's token and returns the login it proved.
 //
 // The errors are written for the joiner, not the log: they are the only
@@ -114,7 +130,7 @@ func (g *Gate) Authorize(ctx context.Context, token string) (string, error) {
 		return login, nil
 	}
 	if g.Admit == nil {
-		return "", fmt.Errorf("live: @%s is not on this share's allowlist", login)
+		return "", notAllowed{fmt.Errorf("live: @%s is not on this share's allowlist", login)}
 	}
 
 	// One question at a time: the approver is a person at a terminal.
@@ -131,7 +147,7 @@ func (g *Gate) Authorize(ctx context.Context, token string) (string, error) {
 	}
 	if !ok {
 		g.logf("refused @%s at the door", login)
-		return "", fmt.Errorf("live: @%s was not let into this share", login)
+		return "", notAllowed{fmt.Errorf("live: @%s was not let into this share", login)}
 	}
 	g.rememberLocked(login, "let @%s in")
 	return login, nil

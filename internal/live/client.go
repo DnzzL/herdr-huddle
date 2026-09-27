@@ -14,6 +14,11 @@ import (
 	"github.com/coder/websocket"
 )
 
+// ErrRefused is the one failure a reconnect cannot fix: this person may not
+// join this share. Everything else — a dropped tunnel, a dead pane, a network
+// blip — is worth dialling again.
+var ErrRefused = errors.New("live: not let in")
+
 // Events is what a client does with the room it has joined.
 //
 // Every field is optional: a renderer that only wants the pane sets Frame, and
@@ -30,6 +35,9 @@ type Events struct {
 	// Said is the outcome of somebody's instruction — the recipient's own or
 	// another member's, told apart by comparing Author with the room's You.
 	Said func(Frame)
+	// Chat is a message from somebody in the room to the room. It never
+	// reached the agent and never will.
+	Chat func(Frame)
 }
 
 // walk reads records until a terminal one, dispatching each.
@@ -59,6 +67,12 @@ func walk(r io.Reader, e Events) error {
 				return fmt.Errorf("live: draw frame: %w", err)
 			}
 		case TypeError:
+			if frame.Fatal {
+				// The door was closed to this person. Reconnecting would
+				// knock again, forever, so say so in a way the caller can
+				// test.
+				return fmt.Errorf("%w: %s", ErrRefused, frame.Message)
+			}
 			if frame.Message == "" {
 				return errors.New("live: the stream failed")
 			}
@@ -78,6 +92,10 @@ func walk(r io.Reader, e Events) error {
 		case TypeRoom:
 			if e.Room != nil {
 				e.Room(frame)
+			}
+		case TypeChat:
+			if e.Chat != nil {
+				e.Chat(frame)
 			}
 		}
 	}
@@ -176,6 +194,22 @@ func (s *Session) Resize(cols, rows int) error {
 	return s.write(Frame{Type: TypeResize, Width: cols, Height: rows})
 }
 
+// Chat sends a message to the people in the room, and to nobody else.
+//
+// It is deliberately a different method from Say, not a flag on it: "talk to
+// my colleague" and "tell the agent to do something" must never be one call
+// that a boolean could get the wrong way round.
+func (s *Session) Chat(text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("live: nothing to say")
+	}
+	if err := s.write(Frame{Type: TypeChat, Text: text}); err != nil {
+		return fmt.Errorf("live: could not send the message: %w", err)
+	}
+	return nil
+}
+
 // Typing says this joiner has started or stopped composing an instruction.
 //
 // It is a claim about oneself: the server attributes it to the login the gate
@@ -223,7 +257,7 @@ func (s *Session) Close() error { return s.conn.Close() }
 //
 // It quotes what was asked for, not only that something was. Two people
 // steering one agent need to know whether the other just asked for the thing
-// they were about to ask for, and "delivered to the agent" does not tell them.
+// they were about to ask for, and "delivered" does not tell them.
 func SaidLine(f Frame) string {
 	who := ""
 	if f.Author != "" {
@@ -233,18 +267,33 @@ func SaidLine(f Frame) string {
 	if said != "" {
 		said = "→ " + said + " · "
 	}
+	return who + said + Outcome(f)
+}
+
+// Outcome words what became of one instruction.
+//
+// It lives here, once, because two clients render it — the plain renderer and
+// the TUI — and a second switch on the same statuses is a second set of words
+// that drifts from these.
+func Outcome(f Frame) string {
 	switch f.Status {
 	case StatusSent:
-		return who + said + "delivered"
+		return "delivered"
+	case StatusQueued:
+		// Not a failure and not a delivery. Saying only "queued" leaves the
+		// person wondering what the queue is.
+		return "waiting for the operator to approve it"
+	case StatusRefused:
+		return "refused: " + f.Reason
 	case StatusHeld:
-		return who + said + "held: " + f.Reason
+		return "held: " + f.Reason
 	case StatusFailed:
-		return who + said + "not delivered: " + f.Reason
+		return "not delivered: " + f.Reason
 	default:
 		if f.Reason != "" {
-			return who + said + f.Status + ": " + f.Reason
+			return f.Status + ": " + f.Reason
 		}
-		return who + said + f.Status
+		return f.Status
 	}
 }
 

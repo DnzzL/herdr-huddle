@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,9 +23,30 @@ import (
 type Client interface {
 	Run(live.Events) error
 	Say(text string) error
+	Chat(text string) error
 	Resize(cols, rows int) error
 	Typing(on bool) error
+	Close() error
 }
+
+// Dialer opens a connection to the huddle. It is called again on every
+// reconnect, so whatever it closes over — the viewport, the token — is read
+// fresh each time.
+type Dialer func(context.Context) (Client, error)
+
+// Where a typed line goes. The two are never one call with a flag: "tell my
+// colleague" and "tell the agent to do something" must not be separated by a
+// boolean somebody can get the wrong way round.
+type mode int
+
+const (
+	toAgent mode = iota
+	toRoom
+)
+
+// errLeft is Ctrl-C: the person left, which is not a failure and never a
+// reason to reconnect.
+var errLeft = errors.New("tui: left the huddle")
 
 // Keys that are not characters. They are carried as runes from the Unicode
 // private use area, which is the one range a person cannot type and so the one
@@ -115,14 +137,17 @@ func Size(f *os.File) (cols, rows int) {
 // not, and `join` falls back to a raw render for it.
 func IsTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
-// Run draws the session until it ends, the context is cancelled, or the person
-// leaves with Ctrl-C.
+// Run draws the huddle until the stream ends for good, the context is
+// cancelled, or the person leaves with Ctrl-C.
 //
-// Leaving is not a failure: Ctrl-C and a stream that closed cleanly both
-// return nil, because both are how a huddle ends.
-func (a *App) Run(ctx context.Context, session Client) error {
-	a.session = session
-
+// A dropped connection is not the end. The tunnel is a quick tunnel and the
+// network is a network, so the loop below redials with a backoff and keeps the
+// terminal it has already taken over — the alternative is that one blip ends
+// the huddle for everybody and they all start again by hand.
+//
+// The two failures it does not retry are the two that retrying cannot fix: the
+// person was not let in, and the person left.
+func (a *App) Run(ctx context.Context, dial Dialer) error {
 	state, err := term.MakeRaw(int(a.In.Fd()))
 	if err != nil {
 		return fmt.Errorf("tui: could not take the keyboard: %w", err)
@@ -130,7 +155,6 @@ func (a *App) Run(ctx context.Context, session Client) error {
 	defer func() { _ = term.Restore(int(a.In.Fd()), state) }()
 
 	cols, rows := Size(a.Out)
-
 	a.mu.Lock()
 	a.view.Cols, a.view.Rows = cols, rows
 	a.view.Event = line{}.add(dim, a.Hint)
@@ -142,44 +166,183 @@ func (a *App) Run(ctx context.Context, session Client) error {
 	defer a.writeRaw("\x1b[r" + leaveAlt + showCursor + reset)
 	a.repaint()
 
-	// SIGWINCH is the only way a terminal says it changed size, and the
-	// server has to hear about it: the stream is rendered at the size this
-	// joiner asked for (ADR-007).
+	// The keyboard and the window belong to the terminal, not to any one
+	// connection, so they are set up once and survive every reconnect.
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
 
+	keys := make(chan rune, 64)
+	go a.readKeys(ctx, keys)
+
+	var attempt int
+	joined := false
+	for {
+		client, err := dial(ctx)
+		if err != nil {
+			if stop := a.backOff(ctx, keys, err, &attempt); stop != nil {
+				return unlessLeft(stop)
+			}
+			continue
+		}
+		attempt = 0
+		a.attach(client)
+		if joined {
+			// Coming back is worth saying. Left on "reconnecting…", the room
+			// reads as still broken while it is already working.
+			a.setEvent(line{}.add(green, "reconnected"))
+		}
+		joined = true
+
+		err = a.oneConnection(ctx, client, keys, winch)
+		_ = client.Close()
+		a.detach()
+
+		if err == nil {
+			return nil // the stream closed cleanly: the huddle is over
+		}
+		if stop := a.backOff(ctx, keys, err, &attempt); stop != nil {
+			return unlessLeft(stop)
+		}
+	}
+}
+
+// unlessLeft turns "the person pressed Ctrl-C" back into an ordinary exit.
+func unlessLeft(err error) error {
+	if errors.Is(err, errLeft) {
+		return nil
+	}
+	return err
+}
+
+// session1 runs one connection, and returns why it ended.
+func (a *App) oneConnection(ctx context.Context, client Client, keys <-chan rune, winch <-chan os.Signal) error {
 	streamed := make(chan error, 1)
 	go func() {
-		streamed <- session.Run(live.Events{
+		streamed <- client.Run(live.Events{
 			Frame: a.drawFrame,
 			Room:  a.setRoom,
 			Said:  a.said,
+			Chat:  a.heard,
 		})
 	}()
-
-	keys := make(chan rune, 64)
-	go a.readKeys(ctx, keys)
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return errLeft
 		case err := <-streamed:
+			if err == nil {
+				return nil
+			}
 			return err
 		case <-winch:
 			a.resized()
 		case key, ok := <-keys:
 			if !ok {
-				// The keyboard ended — a closed stdin — but the pane has not.
-				keys = nil
-				continue
+				return errLeft // stdin ended
 			}
 			if leave := a.key(key); leave {
-				return nil
+				return errLeft
 			}
 		}
 	}
+}
+
+// backOff waits before dialling again, and reports a reason to stop instead.
+//
+// The wait grows and is capped, because a tunnel that is down stays down for
+// seconds rather than milliseconds and hammering it helps nobody. Ctrl-C is
+// still answered throughout: a person watching "reconnecting in 15s" must be
+// able to give up without waiting for it.
+func (a *App) backOff(ctx context.Context, keys <-chan rune, why error, attempt *int) error {
+	switch {
+	case errors.Is(why, errLeft):
+		return why
+	case errors.Is(why, live.ErrRefused):
+		return why
+	case ctx.Err() != nil:
+		return errLeft
+	}
+
+	wait := reconnectDelay(*attempt)
+	*attempt++
+	a.disconnected(why, wait, *attempt)
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return errLeft
+		case <-timer.C:
+			a.setEvent(line{}.add(dim, "reconnecting…"))
+			return nil
+		case key, ok := <-keys:
+			if !ok {
+				return errLeft
+			}
+			if key == 3 || key == 4 { // Ctrl-C, Ctrl-D
+				return errLeft
+			}
+		}
+	}
+}
+
+// reconnectDelay grows the wait to a ceiling: half a second for the blip that
+// fixes itself, fifteen for the tunnel that is properly gone.
+func reconnectDelay(attempt int) time.Duration {
+	const first, max = 500 * time.Millisecond, 15 * time.Second
+	wait := first << attempt
+	if wait > max || wait <= 0 {
+		wait = max
+	}
+	return wait
+}
+
+// disconnected says what happened and what is about to happen. A room that
+// goes silent is indistinguishable from a room that is thinking.
+func (a *App) disconnected(why error, wait time.Duration, attempt int) {
+	a.mu.Lock()
+	// Nothing known about the room is true any more: whoever was in it is not
+	// reachable from here.
+	a.view.Room = Room{You: a.view.Room.You, Thread: a.view.Room.Thread}
+	a.lastMember = nil
+	a.mu.Unlock()
+	a.setEvent(line{}.
+		add(red, "connection lost").
+		add(dim, " · "+fit(strings.ReplaceAll(why.Error(), "\n", " "), 80)+" · ").
+		add(yellow, "retrying in "+humanWait(wait)).
+		add(dim, fmt.Sprintf(" (attempt %d, Ctrl-C to give up)", attempt)))
+}
+
+// humanWait words a delay for a person. Rounding to seconds turns the first,
+// deliberately brief retry into "0s", which reads as broken rather than fast.
+func humanWait(d time.Duration) string {
+	if d < time.Second {
+		return "a moment"
+	}
+	return d.Round(time.Second).String()
+}
+
+func (a *App) attach(client Client) {
+	a.mu.Lock()
+	a.session = client
+	a.mu.Unlock()
+}
+
+func (a *App) detach() {
+	a.mu.Lock()
+	a.session = nil
+	a.typingOn = false
+	a.mu.Unlock()
+}
+
+// talk returns the connection to speak through, or nil while reconnecting.
+func (a *App) talk() Client {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
 }
 
 // key applies one keystroke and reports whether it was the one that leaves.
@@ -204,6 +367,8 @@ func (a *App) key(r rune) bool {
 		a.recall(-1)
 	case keyDown:
 		a.recall(+1)
+	case 20: // Ctrl-T
+		a.toggleMode()
 	default:
 		if r < 0x20 || r >= keyFirst {
 			return false // an unhandled control or navigation key types nothing
@@ -263,18 +428,72 @@ func (a *App) submit() {
 		a.repaint()
 		return
 	}
-	if err := a.session.Say(text); err != nil {
+	client := a.talk()
+	if client == nil {
+		a.setEvent(line{}.add(red, "not connected — nothing was sent"))
+		return
+	}
+
+	a.mu.Lock()
+	where := a.view.Mode
+	a.mu.Unlock()
+
+	if where == toRoom {
+		if err := client.Chat(text); err != nil {
+			a.setEvent(line{}.add(red, "could not send: "+err.Error()))
+			return
+		}
+		// The input was cleared above; repaint so it *looks* cleared. Without
+		// this the sent line sits on screen until the echo arrives, which
+		// invites sending it twice.
+		a.repaint()
+		return // the echo comes back from the room, attributed
+	}
+	if err := client.Say(text); err != nil {
 		a.setEvent(line{}.add(red, "could not send: "+err.Error()))
 		return
 	}
 	a.setEvent(line{}.add(dim, "sending…"))
 }
 
+// toggleMode switches between talking to the agent and talking to the room.
+//
+// The mode is always drawn on the input line, because the expensive mistake is
+// silent: telling the agent to do something when you meant to say "hang on" to
+// a colleague.
+func (a *App) toggleMode() {
+	a.mu.Lock()
+	if a.view.Mode == toAgent {
+		a.view.Mode = toRoom
+	} else {
+		a.view.Mode = toAgent
+	}
+	a.mu.Unlock()
+	a.repaint()
+}
+
+// heard draws a message somebody sent to the room. It never reached the agent,
+// and the line says so by naming the person and nothing else.
+func (a *App) heard(f live.Frame) {
+	a.mu.Lock()
+	mine := f.Author != "" && strings.EqualFold(f.Author, a.view.Room.You)
+	a.mu.Unlock()
+
+	row := line{}
+	if mine {
+		row = row.add(bold, "you")
+	} else {
+		row = row.add(personColour(f.Author), "@"+f.Author)
+	}
+	a.setEvent(row.add(dim, ": ").add(magenta, strings.TrimSpace(f.Text)))
+}
+
 // claimTyping tells the room this person is composing, renewing a standing
-// claim rather than repeating it.
+// claim rather than repeating it. Composing a message to the room is not
+// composing an instruction, so it makes no claim at all.
 func (a *App) claimTyping() {
 	a.mu.Lock()
-	empty := strings.TrimSpace(a.view.Input) == ""
+	empty := strings.TrimSpace(a.view.Input) == "" || a.view.Mode == toRoom
 	fresh := a.typingOn && time.Since(a.typingAt) < typingRenew
 	if !empty {
 		a.typingOn, a.typingAt = true, time.Now()
@@ -288,7 +507,9 @@ func (a *App) claimTyping() {
 	if fresh {
 		return
 	}
-	_ = a.session.Typing(true)
+	if client := a.talk(); client != nil {
+		_ = client.Typing(true)
+	}
 }
 
 // stopTyping retracts the claim, if one is standing.
@@ -297,8 +518,11 @@ func (a *App) stopTyping() {
 	was := a.typingOn
 	a.typingOn = false
 	a.mu.Unlock()
-	if was {
-		_ = a.session.Typing(false)
+	if !was {
+		return
+	}
+	if client := a.talk(); client != nil {
+		_ = client.Typing(false)
 	}
 }
 
@@ -412,28 +636,25 @@ func (a *App) said(f live.Frame) {
 		row = row.add(dim, " → ").add("", said)
 	}
 
-	outcome, style := outcomeOf(f)
 	if len(row) > 0 {
 		row = row.add(dim, " · ")
 	}
-	a.setEvent(row.add(style, outcome))
+	a.setEvent(row.add(outcomeColour(f.Status), live.Outcome(f)))
 }
 
-// outcomeOf words what became of an instruction, and colours it by whether
-// anybody needs to do something about it.
-func outcomeOf(f live.Frame) (string, string) {
-	switch f.Status {
+// outcomeColour says whether anybody needs to do something about an outcome.
+// The words are live's, once, so the two clients cannot drift apart; only the
+// paint is ours.
+func outcomeColour(status string) string {
+	switch status {
 	case live.StatusSent:
-		return "delivered", green
-	case live.StatusHeld:
-		return "held: " + f.Reason, yellow
-	case live.StatusFailed:
-		return "not delivered: " + f.Reason, red
+		return green
+	case live.StatusQueued, live.StatusHeld:
+		return yellow
+	case live.StatusRefused, live.StatusFailed:
+		return red
 	default:
-		if f.Reason != "" {
-			return f.Status + ": " + f.Reason, grey
-		}
-		return f.Status, grey
+		return grey
 	}
 }
 
@@ -460,7 +681,11 @@ func (a *App) resized() {
 
 	a.writeRaw(clearScreen + a.scrollRegion())
 	a.repaint()
-	if err := a.session.Resize(cols, pane); err != nil {
+	client := a.talk()
+	if client == nil {
+		return // reconnecting; the next hello carries the new size
+	}
+	if err := client.Resize(cols, pane); err != nil {
 		a.setEvent(line{}.add(red, "could not ask for a repaint at the new size: "+err.Error()))
 	}
 }

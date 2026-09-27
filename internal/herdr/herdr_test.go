@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -508,5 +509,31 @@ func TestAgent_BusyAndLabel(t *testing.T) {
 	}
 	if got := (Agent{}).Label(); got != "agent" {
 		t.Errorf("Label() = %q, want a usable default", got)
+	}
+}
+
+// The operator is watching their agent, not the log `serve` prints its
+// questions into, so the question has to reach the screen they are looking at.
+// Herdr already owns that surface for agent state changes; this is the same
+// door.
+func TestNotify(t *testing.T) {
+	runner := &fakeRunner{}
+	if err := newTestClient(runner).Notify(context.Background(), "@ana is at the door", "let them in?", SoundRequest); err != nil {
+		t.Fatalf("Notify errored: %v", err)
+	}
+	want := []string{"herdr", "notification", "show", "@ana is at the door", "--body", "let them in?", "--sound", SoundRequest}
+	if got := runner.lastArgs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("ran %v,\n want %v", got, want)
+	}
+}
+
+// The title is the whole notification; without one there is nothing to show.
+func TestNotifyRefusesAnEmptyTitle(t *testing.T) {
+	runner := &fakeRunner{}
+	if err := newTestClient(runner).Notify(context.Background(), "  ", "body", SoundRequest); err == nil {
+		t.Error("an empty title must be refused")
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("ran %v, want nothing", runner.calls)
 	}
 }

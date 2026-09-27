@@ -365,3 +365,34 @@ func truncateForError(raw []byte) string {
 	}
 	return s[:max] + "…"
 }
+
+// SoundRequest is the sound `herdr notification show --sound` plays for
+// something waiting on a person. The vocabulary is Herdr's, not ours, and this
+// is the one of its sounds that means what our questions mean.
+const SoundRequest = "request"
+
+// Notify raises a notification on the operator's own screen.
+//
+// It exists because `serve` asks the operator questions — somebody is at the
+// door, somebody wants to send the agent an instruction — and the operator is
+// watching their agent, not the log those questions are printed in. A question
+// nobody sees is a person waiting on nothing.
+//
+// Herdr owns the surface: it already toasts and plays a sound for agent state
+// changes, so routing ours through the same door means one place to configure
+// and one place they appear. A failure is the caller's to ignore — a missing
+// toast must never stop the question being asked.
+func (c *Client) Notify(ctx context.Context, title, body, sound string) error {
+	if strings.TrimSpace(title) == "" {
+		return errors.New("herdr: a notification needs a title")
+	}
+	args := []string{"notification", "show", title}
+	if body != "" {
+		args = append(args, "--body", body)
+	}
+	if sound != "" {
+		args = append(args, "--sound", sound)
+	}
+	_, err := c.call(ctx, args...)
+	return err
+}

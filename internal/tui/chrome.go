@@ -71,6 +71,10 @@ type View struct {
 	Room  Room
 	Event line
 	Input string
+	// Mode is where the next typed line goes. It is drawn on the input line
+	// and never anywhere else, because that is where the person is looking
+	// when it matters.
+	Mode mode
 	// Cols and Rows are the terminal's, not the pane's.
 	Cols, Rows int
 }
@@ -176,7 +180,7 @@ func (v View) Chrome() string {
 	b.WriteString(restoreCursor)
 	// The cursor is parked where the typing goes, after the restore, because a
 	// visible cursor anywhere else reads as the terminal having lost it.
-	fmt.Fprintf(&b, "\x1b[%d;%dH", v.Rows, promptWidth(v.Input, cols))
+	fmt.Fprintf(&b, "\x1b[%d;%dH", v.Rows, promptWidth(v.Input, v.Mode, cols))
 	return b.String()
 }
 
@@ -315,8 +319,14 @@ func join(parts []line, comma, last line) line {
 // delivered, for as long as anyone else kept typing.
 func (v View) event() line { return v.Event }
 
+// prompt is the input line, and it always says where the line is going.
+//
+// The expensive mistake here is a silent one: telling the agent to do
+// something when you meant to say "hang on a second" to a colleague. So the
+// destination is a word, not a colour, and it is never absent.
 func (v View) prompt(cols int) line {
-	marker := "› "
+	label, colour := v.Mode.label()
+	marker := label + " › "
 	room := cols - width(marker)
 	if room < 1 {
 		room = 1
@@ -327,12 +337,21 @@ func (v View) prompt(cols int) line {
 	if width(text) > room-1 {
 		text = tail(text, room-1)
 	}
-	return line{}.add(cyan, marker).add("", text)
+	return line{}.add(colour, label).add(dim, " › ").add("", text)
+}
+
+func (m mode) label() (string, string) {
+	if m == toRoom {
+		return "room", magenta
+	}
+	return "agent", cyan
 }
 
 // promptWidth is the column the cursor belongs in, 1-based.
-func promptWidth(input string, cols int) int {
-	room := cols - 2
+func promptWidth(input string, mode mode, cols int) int {
+	label, _ := mode.label()
+	marker := width(label) + 3 // "label › "
+	room := cols - marker
 	if room < 1 {
 		room = 1
 	}
@@ -340,7 +359,7 @@ func promptWidth(input string, cols int) int {
 	if shown > room-1 {
 		shown = room - 1
 	}
-	return 3 + shown
+	return marker + 1 + shown
 }
 
 // agentState turns herdr's vocabulary into something a person reads at a

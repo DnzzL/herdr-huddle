@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -654,9 +655,9 @@ func TestTerminalApproverReadsTheOperatorsAnswer(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var asked bytes.Buffer
-			approver := &terminalApprover{in: bufio.NewReader(strings.NewReader(c.typed)), out: &asked}
+			at := &console{in: bufio.NewReader(strings.NewReader(c.typed)), out: &asked}
 
-			got, err := approver.Approve(context.Background(), "collaborator")
+			got, err := at.Approve(context.Background(), "collaborator")
 			if (err != nil) != c.wantErr {
 				t.Fatalf("Approve error = %v, wantErr %v", err, c.wantErr)
 			}
@@ -676,15 +677,16 @@ func TestDoorFor(t *testing.T) {
 	state := share.State{Repo: "acme/demo", Branch: "herdr/a", Allowlist: []string{"operator"}}
 	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
 
-	knock := doorFor(store, state, false, false, nil)
+	at := &console{in: bufio.NewReader(strings.NewReader("")), out: io.Discard}
+	knock := doorFor(store, state, false, false, at, nil)
 	if knock.Admit == nil || knock.Open {
 		t.Error("the default door must knock")
 	}
-	open := doorFor(store, state, true, false, nil)
+	open := doorFor(store, state, true, false, at, nil)
 	if !open.Open || open.Admit != nil {
 		t.Error("--open must admit without an approver")
 	}
-	closed := doorFor(store, state, false, true, nil)
+	closed := doorFor(store, state, false, true, at, nil)
 	if closed.Open || closed.Admit != nil {
 		t.Error("--closed must have no way to admit anyone new")
 	}
@@ -709,4 +711,134 @@ func TestRememberJoinerWritesTheAllowlist(t *testing.T) {
 	if got := states[0].Allowlist; len(got) != 2 || got[1] != "collaborator" {
 		t.Errorf("allowlist = %v, want the operator and the admitted joiner", got)
 	}
+}
+
+// A moderated share asks about the words, not about the person: "let @ana send
+// something" is not a decision anybody can make. The question therefore quotes
+// the instruction in full.
+func TestConsoleApproveInstruction(t *testing.T) {
+	cases := []struct {
+		name  string
+		typed string
+		want  bool
+	}{
+		{"yes", "y\n", true},
+		{"no", "n\n", false},
+		{"just enter is a no", "\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var asked bytes.Buffer
+			var raised []string
+			at := &console{
+				in:     bufio.NewReader(strings.NewReader(c.typed)),
+				out:    &asked,
+				notify: func(title, body string) { raised = append(raised, title+" | "+body) },
+			}
+
+			got, err := at.ApproveInstruction(context.Background(), "ana", "drop the users table")
+			if err != nil {
+				t.Fatalf("ApproveInstruction errored: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("approved = %v, want %v", got, c.want)
+			}
+			if !strings.Contains(asked.String(), "drop the users table") {
+				t.Errorf("the question %q does not quote the instruction", asked.String())
+			}
+			if !strings.Contains(asked.String(), "@ana") {
+				t.Errorf("the question %q does not name who is asking", asked.String())
+			}
+			// The operator is watching their agent, not this log.
+			if len(raised) != 1 || !strings.Contains(raised[0], "@ana") {
+				t.Errorf("notifications = %v, want one naming @ana", raised)
+			}
+		})
+	}
+}
+
+// A question can be abandoned. A joiner who sends an instruction and then
+// disconnects would otherwise leave the operator staring at a prompt about
+// somebody who is gone — while holding the turn, so nobody else could be
+// admitted either.
+func TestConsoleGivesUpOnAQuestionNobodyIsWaitingFor(t *testing.T) {
+	asked := &safeBuffer{}
+	// A reader that never produces a line: the operator is not at the desk.
+	at := &console{in: bufio.NewReader(blockingReader{}), out: asked}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := at.ApproveInstruction(ctx, "ana", "drop the users table")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("an abandoned question must report that it was abandoned")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the question was never abandoned, so the door is wedged shut")
+	}
+
+	// And the turn is free again: the next question is asked, not blocked.
+	free := make(chan struct{})
+	go func() {
+		_, _ = at.ApproveInstruction(context.Background(), "bo", "run the tests")
+		close(free)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(asked.String(), "@bo") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the next question was never asked: the abandoned one still holds the turn")
+}
+
+// An answer answers the question in front of it. An idle "y" left in the
+// buffer must never silently admit the next person who knocks.
+func TestConsoleIgnoresWhatWasTypedBeforeTheQuestion(t *testing.T) {
+	asked := &safeBuffer{}
+	stale, out := io.Pipe()
+	at := &console{in: bufio.NewReader(stale), out: asked}
+	at.listen() // as `serve` does at startup
+
+	// Somebody idly types y long before anyone is at the door.
+	go func() { _, _ = io.WriteString(out, "y\n") }()
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	got, _ := at.Approve(ctx, "stranger")
+	if got {
+		t.Error("a stale y admitted somebody nobody was asked about")
+	}
+}
+
+// blockingReader is an operator who is not at their desk.
+type blockingReader struct{}
+
+func (blockingReader) Read([]byte) (int, error) { select {} }
+
+// safeBuffer is a buffer the console's goroutine writes and the test reads.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

@@ -75,6 +75,10 @@ func (d *deadlineConn) Read(p []byte) (int, error) {
 	return d.Conn.Read(p)
 }
 
+// readerFor wraps a connection so a test waiting on a record it will never
+// get fails instead of hanging.
+func readerFor(conn net.Conn) *bufio.Reader { return bufio.NewReader(&deadlineConn{conn}) }
+
 // await reads until a record the predicate accepts, and fails the test if the
 // stream ends first.
 func await(t *testing.T, r *bufio.Reader, what string, ok func(Frame) bool) Frame {

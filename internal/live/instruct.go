@@ -37,6 +37,12 @@ const (
 	StatusHeld = "held"
 	// StatusFailed means nothing reached the agent.
 	StatusFailed = "failed"
+	// StatusQueued means the instruction is waiting for the operator to
+	// approve it, on a share served with --moderated. It is not a failure and
+	// not a delivery: the answer comes later, as a second record.
+	StatusQueued = "queued"
+	// StatusRefused means the operator was asked and said no.
+	StatusRefused = "refused"
 )
 
 // deliveryFailure turns a delivery error into what the joiner should hear.
@@ -46,4 +52,23 @@ func deliveryFailure(err error) (status, reason string) {
 		return StatusHeld, "the agent is waiting on its operator"
 	}
 	return StatusFailed, oneLine([]byte(err.Error()))
+}
+
+// Moderator decides whether a joiner's instruction reaches the agent.
+//
+// It is the tier ADR-007's door was missing. Letting somebody into the room
+// and letting them drive an agent that runs with the operator's permissions
+// were one decision; with a moderator they are two, and the second one is
+// asked per instruction, with the words in front of the person answering.
+//
+// An error means the question could not be put, and is never an approval.
+type Moderator interface {
+	Approve(ctx context.Context, login, text string) (bool, error)
+}
+
+// ModeratorFunc adapts a function to Moderator.
+type ModeratorFunc func(ctx context.Context, login, text string) (bool, error)
+
+func (f ModeratorFunc) Approve(ctx context.Context, login, text string) (bool, error) {
+	return f(ctx, login, text)
 }
