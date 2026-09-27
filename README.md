@@ -129,9 +129,11 @@ herdr-huddle: @collaborator is at the door (github.com/collaborator).
 
 One `y` and they are in for good: the login goes onto the share's allowlist, so
 their pull-request comments start being delivered too, and a reconnect does not
-ask you again. `--open` skips the question (anyone with the link and a GitHub
-identity is in) and `--closed` never asks (the allowlist or nothing) — that one
-is for a `serve` nobody is sitting in front of.
+ask you again. `--open` skips the question — anyone with the link and a GitHub
+identity is in, for as long as `serve` runs, and nothing is written to the
+allowlist, because being open for one huddle is not the same as trusting
+someone's comments from now on. `--closed` never asks (the allowlist or
+nothing), for a `serve` nobody is sitting in front of.
 
 What the joiner sees is a room, not a pipe:
 
@@ -199,10 +201,11 @@ rather than left with a blank screen. Piped somewhere that is not a terminal,
 - **`--open` makes the link the entire boundary.** It is the Live Share posture
   and it is a real trade: anyone who can see the URL and has any GitHub account
   is in, with no human in the loop. That is why it is a flag and not the
-  default.
-- **Letting somebody in is not reversible from here.** The admission is written
-  to the share record, so it also makes their `/agent` comments deliverable.
-  Taking it back means editing `shares.json` and restarting the poller.
+  default. It does not outlive the `serve` that granted it.
+- **Answering `y` is not reversible from here.** That admission *is* written to
+  the share record, which is the point — it also makes their `/agent` comments
+  deliverable. Taking it back means editing `shares.json`; the poller picks the
+  change up on its next pass.
 - **A dead token refuses cleanly.** If GitHub no longer accepts the stored
   token, the gate says `GitHub could not confirm the token` and shows nothing;
   run `herdr-huddle auth login` again. (The same dead token stops `poll` from

@@ -64,10 +64,13 @@ type Gate struct {
 	Admit Approver
 	// Open admits any login GitHub confirms, without asking. The link is then
 	// the whole invitation — the operator's choice, never the default
-	// (ADR-007).
+	// (ADR-007). An open admission lasts as long as the server does and is
+	// never persisted: being convenient for the length of a huddle is not the
+	// same decision as trusting somebody's pull-request comments forever.
 	Open bool
 	// Remember persists a newly admitted login onto the share, so that the
 	// poller delivers their comments too and a reconnect does not knock twice.
+	// It is called for a knock the operator answered and for nothing else.
 	// A failure to persist is logged, not fatal: the person is already in.
 	Remember func(login string) error
 	// Log receives one line per door event.
@@ -107,7 +110,7 @@ func (g *Gate) Authorize(ctx context.Context, token string) (string, error) {
 		return login, nil
 	}
 	if g.Open {
-		g.remember(login, "admitted @%s: this share is open, so the link was the invitation")
+		g.admit(login, "admitted @%s for this session: the share is open, so the link was the invitation")
 		return login, nil
 	}
 	if g.Admit == nil {
@@ -153,23 +156,31 @@ func (g *Gate) knownLocked(login string) bool {
 	return false
 }
 
-func (g *Gate) remember(login, format string) {
+// admit adds the login to this server's allowlist, for as long as it runs.
+// The in-memory list is what stops the next connection from asking again.
+func (g *Gate) admit(login, format string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.knownLocked(login) {
 		return
 	}
-	g.rememberLocked(login, format)
+	g.admitLocked(login, format)
 }
 
-// rememberLocked adds the login to the live allowlist and persists it.
-//
-// The in-memory list is what stops the next connection from knocking again;
-// the persisted one is what makes the same person's pull-request comments
-// deliverable, which is ADR-005's one-list rule (ADR-007).
-func (g *Gate) rememberLocked(login, format string) {
+func (g *Gate) admitLocked(login, format string) {
 	g.Allowlist = append(g.Allowlist, login)
 	g.logf(format, login)
+}
+
+// rememberLocked admits the login and writes it onto the share.
+//
+// Only an answered knock reaches here, and the difference from admitLocked is
+// the whole point: the persisted list is what makes that person's
+// pull-request comments deliverable — ADR-005's one-list rule — and that is a
+// decision about somebody, not a convenience for the length of a session. An
+// --open admission is deliberately not written (ADR-007).
+func (g *Gate) rememberLocked(login, format string) {
+	g.admitLocked(login, format)
 	if g.Remember == nil {
 		return
 	}

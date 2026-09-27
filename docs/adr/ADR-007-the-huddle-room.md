@@ -58,10 +58,14 @@ room on every joiner's screen, and rendered at each joiner's own size.**
    reconnect does not knock twice.
 
    `--open` admits any proven GitHub identity without asking (the link is the
-   invitation, and the operator has decided that is enough). `--closed` is
-   today's behaviour: the allowlist or nothing, no prompt. The default is
-   `--knock` because it is the only one of the three that is both frictionless
-   for the guest and a decision the operator actually makes.
+   invitation, and the operator has decided that is enough) — **and does not
+   persist it**. An open admission lasts as long as the server does, because
+   "be convenient for the length of this huddle" is not the same decision as
+   "trust this person's pull-request comments from now on"; only an answered
+   knock is written to the share. `--closed` is today's behaviour: the
+   allowlist or nothing, no prompt. The default is `--knock` because it is the
+   only one of the three that is both frictionless for the guest and a
+   decision the operator actually makes.
 
    **This does not relax the trust model; it moves the decision to where the
    evidence is.** The allowlist was set at `share` time, before anyone had

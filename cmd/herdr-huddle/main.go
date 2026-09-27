@@ -149,7 +149,8 @@ Serve and join:
                          window size.
            --no-tunnel   do not start a tunnel; serve on this address only.
            --open        let anyone with the link and a GitHub identity in,
-                         without asking. The link becomes the invitation.
+                         without asking. The link becomes the invitation, and
+                         the admission lasts only as long as serve does.
            --closed      the allowlist or nothing, and nobody is asked — for a
                          serve nobody is sitting in front of.
            By default the door knocks: somebody who is not on the allowlist
@@ -575,7 +576,7 @@ func doorFor(store share.Store, state share.State, open, closed bool, logf func(
 func doorLabel(open, closed bool) string {
 	switch {
 	case open:
-		return "open: anyone with the link and a GitHub identity is let in"
+		return "open: anyone with the link and a GitHub identity is let in, for as long as this runs"
 	case closed:
 		return "closed: only the share's allowlist, and nobody is asked"
 	default:

@@ -138,8 +138,11 @@ func TestUnanswerableKnockRefuses(t *testing.T) {
 	}
 }
 
-// --open is the operator deciding once that the link is the invitation.
-func TestOpenDoorAdmitsWithoutAsking(t *testing.T) {
+// --open is the operator deciding once that the link is the invitation, for
+// the length of this huddle — and not one minute longer. Writing a passer-by
+// to the share's allowlist would make their pull-request comments deliverable
+// forever, which is a different decision from the one --open expresses.
+func TestOpenDoorAdmitsWithoutAskingAndWithoutRemembering(t *testing.T) {
 	approver := &approverStub{}
 	record := &rememberer{}
 	gate := &Gate{
@@ -154,8 +157,13 @@ func TestOpenDoorAdmitsWithoutAsking(t *testing.T) {
 	if got := approver.askedAbout(); len(got) != 0 {
 		t.Errorf("asked %v, want nobody asked on an open door", got)
 	}
-	if got := record.recorded(); len(got) != 1 {
-		t.Errorf("recorded %v, want the guest written to the share", got)
+	if got := record.recorded(); len(got) != 0 {
+		t.Errorf("wrote %v to the share; an open admission lasts only as long as the server", got)
+	}
+	// It still holds for this server, so a second connection is not a second
+	// round trip to GitHub's allowlist check.
+	if !gate.known("guest") {
+		t.Error("the admission must last for this session")
 	}
 }
 
@@ -191,9 +199,10 @@ func TestEmptyAllowlistWithAClosedDoorRefusesToStart(t *testing.T) {
 // config dir — and that must not undo an admission the operator just made.
 func TestAnAdmissionSurvivesAFailedRecord(t *testing.T) {
 	gate := &Gate{
-		Verify:   &verifierStub{login: "guest"},
-		Open:     true,
-		Remember: (&rememberer{err: errors.New("no such share")}).remember,
+		Verify:    &verifierStub{login: "guest"},
+		Allowlist: []string{"operator"},
+		Admit:     &approverStub{yes: true},
+		Remember:  (&rememberer{err: errors.New("no such share")}).remember,
 	}
 	if _, err := gate.Authorize(context.Background(), "their-token"); err != nil {
 		t.Fatalf("the person is already in; a failed write must not eject them: %v", err)
