@@ -129,7 +129,20 @@ room on every joiner's screen, and rendered at each joiner's own size.**
   unattended case.
 - `serve` now **writes** to the share record (the allowlist), where before it
   only read it. The poller reads the same file, so an admitted collaborator's
-  comments start being delivered without either process restarting.
+  comments start being delivered without either process restarting. That makes
+  three processes writing one file, so two rules become load-bearing and are
+  enforced in `share.Store` rather than in each caller:
+  - **Every read-modify-write holds a lock** (`shares.json.lock`, an advisory
+    flock, released by the kernel on exit so a crash leaves nothing to clear).
+    Without it the last writer silently discards the others, and the costliest
+    thing to discard is the poller's comment cursor — the agent would be handed
+    an instruction it has already carried out.
+  - **Fields have owners.** Cursors and retirement are the poller's; the
+    allowlist is the door's. The poller therefore writes with `Save`, which
+    keeps the allowlist that is on disk, because the record it holds was read
+    at the start of its pass and may predate an admission by a minute. A lock
+    alone does not fix this: it serialises the writes without making a stale
+    copy less stale.
 - Each joiner costs one `observe` child as before, plus one restart per resize.
   A joiner dragging a window edge restarts their stream repeatedly; the size is
   debounced for that reason.

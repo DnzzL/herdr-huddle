@@ -2,9 +2,11 @@ package share
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,10 +197,15 @@ func TestStore_WriteLeavesNoTemporaryFiles(t *testing.T) {
 	}
 	var names []string
 	for _, e := range entries {
+		// The lock file is deliberate and permanent, not debris: it is what
+		// keeps `poll` and `serve` from overwriting each other's writes.
+		if e.Name() == "shares.json.lock" {
+			continue
+		}
 		names = append(names, e.Name())
 	}
 	if len(names) != 1 || names[0] != "shares.json" {
-		t.Errorf("directory contains %v, want only shares.json", names)
+		t.Errorf("directory contains %v, want only shares.json (and the lock)", names)
 	}
 }
 
@@ -349,5 +356,94 @@ func TestRecord_RevivesARetiredShare(t *testing.T) {
 	}
 	if !got.Active() {
 		t.Error("the record is still retired, so the poller would never serve it again")
+	}
+}
+
+// The store is written by three processes — `share`, `poll` and `serve` — and
+// every write is a read-modify-write of the whole list. Without a lock the
+// last writer discards what the others did, and the most costly thing to
+// discard is the poller's comment cursor: the agent would be handed an
+// instruction it has already carried out.
+func TestConcurrentWritersDoNotDiscardEachOther(t *testing.T) {
+	store := testStore(t)
+	base := state("acme/demo", "herdr/a", 1)
+	base.Allowlist = nil
+	if err := store.Put(base); err != nil {
+		t.Fatal(err)
+	}
+
+	const admissions = 12
+	var wg sync.WaitGroup
+	// One writer advancing the cursor the way the poller does, and many
+	// admitting logins the way a busy door does.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; i <= admissions; i++ {
+			st := base
+			st.Cursors.Comment = int64(i)
+			if err := store.Save(st); err != nil {
+				t.Error(err)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	for i := 0; i < admissions; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := store.Allow(base.Key(), fmt.Sprintf("guest%d", i)); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	states, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("got %d shares, want 1", len(states))
+	}
+	if got := len(states[0].Allowlist); got != admissions {
+		t.Errorf("allowlist holds %d logins, want all %d: an admission was discarded", got, admissions)
+	}
+}
+
+// Admitting the same person twice is not an error and does not list them
+// twice: a reconnect goes through this path.
+func TestAllowIsIdempotent(t *testing.T) {
+	store := testStore(t)
+	st := state("acme/demo", "herdr/a", 1)
+	st.Allowlist = []string{"operator"}
+	if err := store.Put(st); err != nil {
+		t.Fatal(err)
+	}
+	added, err := store.Allow(st.Key(), "Guest")
+	if err != nil || !added {
+		t.Fatalf("Allow = %v, %v; want it to add the login", added, err)
+	}
+	// Case is GitHub's business, not ours: the same person in another spelling.
+	added, err = store.Allow(st.Key(), "guest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added {
+		t.Error("the same login was added twice")
+	}
+	states, _ := store.Load()
+	if got := states[0].Allowlist; len(got) != 2 {
+		t.Errorf("allowlist = %v, want the operator and one guest", got)
+	}
+}
+
+// A share that is gone cannot admit anyone, and saying so is better than
+// writing an allowlist nobody reads.
+func TestAllowRefusesAnUnknownShare(t *testing.T) {
+	store := testStore(t)
+	if _, err := store.Allow("acme/demo#herdr/gone", "guest"); err == nil {
+		t.Error("admitting into a share that is not recorded must fail")
 	}
 }

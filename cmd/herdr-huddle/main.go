@@ -610,24 +610,8 @@ func (t *terminalApprover) Approve(_ context.Context, login string) (bool, error
 // delivers their pull-request comments too. One list, two doors (ADR-005).
 func rememberJoiner(store share.Store, key string) func(string) error {
 	return func(login string) error {
-		states, err := store.Load()
-		if err != nil {
-			return err
-		}
-		for _, state := range states {
-			if state.Key() != key {
-				continue
-			}
-			for _, allowed := range state.Allowlist {
-				if strings.EqualFold(allowed, login) {
-					return nil
-				}
-			}
-			state.Allowlist = append(state.Allowlist, login)
-			state.UpdatedAt = time.Now()
-			return store.Put(state)
-		}
-		return fmt.Errorf("share %s is no longer recorded", key)
+		_, err := store.Allow(key, login)
+		return err
 	}
 }
 

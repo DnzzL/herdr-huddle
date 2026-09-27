@@ -140,6 +140,16 @@ func (s Store) Record(fresh State, seedTranscript string) (State, bool, error) {
 	if fresh.Key() == "#" {
 		return State{}, false, errors.New("share: refusing to record a share with no repository or branch")
 	}
+	var resumed bool
+	err := s.withLock(func() error {
+		var err error
+		fresh, resumed, err = s.record(fresh, seedTranscript)
+		return err
+	})
+	return fresh, resumed, err
+}
+
+func (s Store) record(fresh State, seedTranscript string) (State, bool, error) {
 	states, err := s.Load()
 	if err != nil {
 		return State{}, false, err
@@ -176,12 +186,48 @@ func (s Store) Record(fresh State, seedTranscript string) (State, bool, error) {
 		break
 	}
 
-	return fresh, resumed, s.Put(fresh)
+	return fresh, resumed, s.put(fresh)
 }
 
 // Store is the on-disk list of active shares.
 type Store struct {
 	Path string
+}
+
+// Allow adds a login to a share's allowlist, and reports whether it was new.
+//
+// It exists as one operation rather than as a Load the caller follows with a
+// Put because it is the one write made *during* a live session, while the
+// poller is writing cursors to the same file: reading and writing under one
+// lock is what keeps an admission from discarding a cursor, or a cursor from
+// discarding an admission (ADR-007).
+func (s Store) Allow(key, login string) (bool, error) {
+	if key == "" || strings.TrimSpace(login) == "" {
+		return false, errors.New("share: refusing to allow an empty login")
+	}
+	added := false
+	err := s.withLock(func() error {
+		states, err := s.Load()
+		if err != nil {
+			return err
+		}
+		for _, state := range states {
+			if state.Key() != key {
+				continue
+			}
+			for _, allowed := range state.Allowlist {
+				if strings.EqualFold(allowed, login) {
+					return nil
+				}
+			}
+			state.Allowlist = append(state.Allowlist, login)
+			state.UpdatedAt = time.Now()
+			added = true
+			return s.put(state)
+		}
+		return fmt.Errorf("share %s is no longer recorded", key)
+	})
+	return added, err
 }
 
 // Load returns the recorded shares, sorted by key so that output and tests do
@@ -211,7 +257,39 @@ func (s Store) Load() ([]State, error) {
 
 // Put records a share, replacing any record with the same key. Replacing rather
 // than appending is what keeps a re-shared thread from being polled twice.
+//
+// It replaces the whole record, allowlist included. A caller holding a record
+// it read some time ago wants Save instead.
 func (s Store) Put(state State) error {
+	return s.withLock(func() error { return s.put(state) })
+}
+
+// Save records progress on a share that already exists, keeping the fields
+// this caller does not own.
+//
+// The allowlist is the one of those, and the reason is ADR-007: `serve`
+// appends an admitted login to it *while a huddle is running*, and the poller
+// writes a record it read at the start of its pass. Writing that copy back
+// whole would un-admit somebody who joined thirty seconds ago — quietly, and
+// only until the next time they reconnected and had to knock again. Cursors
+// and retirement belong to the poller; the allowlist belongs to the door.
+func (s Store) Save(state State) error {
+	return s.withLock(func() error {
+		states, err := s.Load()
+		if err != nil {
+			return err
+		}
+		for _, existing := range states {
+			if existing.Key() == state.Key() {
+				state.Allowlist = append([]string(nil), existing.Allowlist...)
+				break
+			}
+		}
+		return s.put(state)
+	})
+}
+
+func (s Store) put(state State) error {
 	states, err := s.Load()
 	if err != nil {
 		return err
@@ -236,6 +314,16 @@ func (s Store) Put(state State) error {
 
 // Delete removes a share and reports whether it was there.
 func (s Store) Delete(key string) (bool, error) {
+	var found bool
+	err := s.withLock(func() error {
+		var err error
+		found, err = s.delete(key)
+		return err
+	})
+	return found, err
+}
+
+func (s Store) delete(key string) (bool, error) {
 	states, err := s.Load()
 	if err != nil {
 		return false, err

@@ -224,7 +224,9 @@ func (p *Poller) Once(ctx context.Context) (Result, error) {
 
 		if !reflect.DeepEqual(before, st) {
 			st.UpdatedAt = p.Options.now()
-			if err := p.Shares.Put(st); err != nil {
+			// Save, not Put: the allowlist may have grown at the door since
+			// this record was read (ADR-007), and the poller does not own it.
+			if err := p.Shares.Save(st); err != nil {
 				return out, err
 			}
 		}
