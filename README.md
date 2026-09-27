@@ -83,31 +83,37 @@ running in a Herdr pane. `pi` and Claude Code have a transcript adapter; any
 other agent works, with its transcript read from the pane's terminal and
 labelled as such.
 
-**1. Create a GitHub OAuth App.** Settings → Developer settings → OAuth Apps →
-New OAuth App. Any name and homepage URL; the callback URL is unused but must be
-filled in (say `https://github.com`). **Tick "Enable Device Flow"** and copy the
-client id — it looks like `Iv1.0123456789abcdef`.
-
-> The client id is not a secret. The device flow was chosen precisely so that no
-> client secret exists and nothing has to be hosted.
-
-**2. Build it with that client id.**
+**1. Install it as a Herdr plugin.** This clones it, builds it, and registers it;
+the poller starts on the next server start.
 
 ```
-make build CLIENT_ID=Iv1.0123456789abcdef
+herdr plugin install DnzzL/herdr-huddle
 ```
 
-**3. Link the plugin**, which registers it with Herdr and starts the poller on
-the next server start:
+To work on it instead, build and link the checkout — `make install` prints the
+link command rather than running it, because registering a plugin is a change to
+your Herdr, not to this repository:
 
 ```
-herdr plugin link /path/to/herdr-huddle
+make build && herdr plugin link /path/to/herdr-huddle
 ```
 
-`make install` prints this command rather than running it: registering a plugin
-is a change to your Herdr, not to this repository.
+**2. Create a GitHub OAuth App**, and tell the binary about it. Settings →
+Developer settings → OAuth Apps → New OAuth App. Any name and homepage URL; the
+callback URL is unused but must be filled in (say `https://github.com`). **Tick
+"Enable Device Flow"** and copy the client id — it looks like
+`Iv1.0123456789abcdef`. Then put it in your shell profile:
 
-**4. Authorize.**
+```
+export HERDR_HUDDLE_CLIENT_ID=Iv1.0123456789abcdef
+```
+
+> One OAuth App per person, not one per plugin — which is why it is not baked
+> into the build. The client id is not a secret: the device flow was chosen
+> precisely so that no client secret exists and nothing has to be hosted. If you
+> would rather compile it in, `make build CLIENT_ID=Iv1.…` still does that.
+
+**3. Authorize.**
 
 ```
 ./bin/herdr-huddle auth login --repo owner/name
@@ -118,7 +124,7 @@ keychain, scoped to the narrowest thing that works: `public_repo` for a public
 repository, `repo` for a private one. `GH_TOKEN` and `GITHUB_TOKEN` are honoured
 first if you already have one.
 
-**5. Open a share from inside the pane** whose agent you want to share:
+**4. Open a share from inside the pane** whose agent you want to share:
 
 ```
 ./bin/herdr-huddle share

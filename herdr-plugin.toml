@@ -5,6 +5,19 @@ min_herdr_version = "0.9.0"
 description = "Turn a live agent session into a GitHub draft PR two people can plan in"
 platforms = ["linux", "macos"]
 
+# Without this, `herdr plugin install` clones the repository, registers nothing
+# to build the binary, and the startup hook below then fails on a missing
+# bin/herdr-huddle. Build commands run at install time in the plugin root, and
+# get none of the runtime plugin environment — so this has to be self-contained,
+# which `make build` is.
+#
+# Deliberately no CLIENT_ID here. It is one OAuth App per person, not one per
+# plugin, so the binary reads HERDR_HUDDLE_CLIENT_ID at runtime instead; baking
+# one in at install time would hand every user the same app.
+[[build]]
+command = ["make", "build"]
+platforms = ["linux", "macos"]
+
 # Startup hooks are one-shot: they run once per enabled plugin after the session
 # is restored and the API socket is ready, and again when a new server takes over
 # during a live handoff. The poller has to outlive that, so the hook detaches it
