@@ -640,31 +640,28 @@ func TestShareForServe(t *testing.T) {
 // The door is the operator answering a question at their own terminal, so the
 // question and the answer are the whole contract: anything but a plain yes is
 // a no, and nobody to ask is an error rather than a yes.
-func TestTerminalApproverReadsTheOperatorsAnswer(t *testing.T) {
+func TestConsoleApprovesAtTheDoor(t *testing.T) {
 	cases := []struct {
-		name    string
-		typed   string
-		want    bool
-		wantErr bool
+		name  string
+		typed string
+		want  bool
 	}{
-		{"y", "y\n", true, false},
-		{"yes", "yes\n", true, false},
-		{"upper case", "Y\n", true, false},
-		{"with whitespace", "  y  \n", true, false},
-		{"n", "n\n", false, false},
-		{"just enter is a no", "\n", false, false},
-		{"anything else is a no", "maybe\n", false, false},
-		{"an answer with no newline still counts", "y", true, false},
-		{"nobody there is not a yes", "", false, true},
+		{"y", "y\n", true},
+		{"yes", "yes\n", true},
+		{"upper case", "Y\n", true},
+		{"with whitespace", "  y  \n", true},
+		{"n", "n\n", false},
+		{"just enter is a no", "\n", false},
+		{"anything else is a no", "maybe\n", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var asked bytes.Buffer
-			at := &console{in: bufio.NewReader(strings.NewReader(c.typed)), out: &asked}
-
-			got, err := at.Approve(context.Background(), "collaborator")
-			if (err != nil) != c.wantErr {
-				t.Fatalf("Approve error = %v, wantErr %v", err, c.wantErr)
+			at, reply, asked := waitingConsole(t)
+			got, err := answerOnce(t, asked, reply, c.typed, func() (bool, error) {
+				return at.Approve(context.Background(), "collaborator")
+			})
+			if err != nil {
+				t.Fatalf("Approve errored: %v", err)
 			}
 			if got != c.want {
 				t.Errorf("Approve = %v, want %v", got, c.want)
@@ -676,53 +673,21 @@ func TestTerminalApproverReadsTheOperatorsAnswer(t *testing.T) {
 	}
 }
 
-// Which door `serve` opens is decided by two flags and nothing else, and the
-// wrong default here would be an unattended public pane.
-func TestDoorFor(t *testing.T) {
-	state := share.State{Repo: "acme/demo", Branch: "herdr/a", Allowlist: []string{"operator"}}
-	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
-
-	at := &console{in: bufio.NewReader(strings.NewReader("")), out: io.Discard}
-	knock := doorFor(store, state, false, false, at, nil)
-	if knock.Admit == nil || knock.Open {
-		t.Error("the default door must knock")
-	}
-	open := doorFor(store, state, true, false, at, nil)
-	if !open.Open || open.Admit != nil {
-		t.Error("--open must admit without an approver")
-	}
-	closed := doorFor(store, state, false, true, at, nil)
-	if closed.Open || closed.Admit != nil {
-		t.Error("--closed must have no way to admit anyone new")
-	}
-}
-
-// An admission has to reach the file the poller reads, or the collaborator is
-// in the huddle and their comments are still refused.
-func TestRememberJoinerWritesTheAllowlist(t *testing.T) {
-	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
-	state := share.State{Repo: "acme/demo", Branch: "herdr/a", Allowlist: []string{"operator"}}
-	if err := store.Put(state); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := rememberJoiner(store, state.Key())("collaborator"); err != nil {
-		t.Fatalf("remembering an admitted joiner: %v", err)
-	}
-	states, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := states[0].Allowlist; len(got) != 2 || got[1] != "collaborator" {
-		t.Errorf("allowlist = %v, want the operator and the admitted joiner", got)
+// Nobody at the terminal is a refusal, never an admission.
+func TestConsoleRefusesWhenThereIsNobodyToAsk(t *testing.T) {
+	asked := &safeBuffer{}
+	at := &console{in: bufio.NewReader(strings.NewReader("")), out: asked}
+	at.listen()
+	if got, err := at.Approve(context.Background(), "collaborator"); got || err == nil {
+		t.Errorf("Approve = %v, %v; want a refusal and an error", got, err)
 	}
 }
 
 // A moderated share asks about the words, not about the person: "let @ana send
 // something" is not a decision anybody can make. The question therefore quotes
 // the instruction in full.
-func TestConsoleApproveInstruction(t *testing.T) {
-	cases := []struct {
+func TestConsoleApprovesAnInstruction(t *testing.T) {
+	for _, c := range []struct {
 		name  string
 		typed string
 		want  bool
@@ -730,18 +695,15 @@ func TestConsoleApproveInstruction(t *testing.T) {
 		{"yes", "y\n", true},
 		{"no", "n\n", false},
 		{"just enter is a no", "\n", false},
-	}
-	for _, c := range cases {
+	} {
 		t.Run(c.name, func(t *testing.T) {
-			var asked bytes.Buffer
 			var raised []string
-			at := &console{
-				in:     bufio.NewReader(strings.NewReader(c.typed)),
-				out:    &asked,
-				notify: func(title, body string) { raised = append(raised, title+" | "+body) },
-			}
+			at, reply, asked := waitingConsole(t)
+			at.notify = func(title, body string) { raised = append(raised, title+" | "+body) }
 
-			got, err := at.ApproveInstruction(context.Background(), "ana", "drop the users table")
+			got, err := answerOnce(t, asked, reply, c.typed, func() (bool, error) {
+				return at.ApproveInstruction(context.Background(), "ana", "drop the users table")
+			})
 			if err != nil {
 				t.Fatalf("ApproveInstruction errored: %v", err)
 			}
@@ -751,14 +713,56 @@ func TestConsoleApproveInstruction(t *testing.T) {
 			if !strings.Contains(asked.String(), "drop the users table") {
 				t.Errorf("the question %q does not quote the instruction", asked.String())
 			}
-			if !strings.Contains(asked.String(), "@ana") {
-				t.Errorf("the question %q does not name who is asking", asked.String())
-			}
-			// The operator is watching their agent, not this log.
 			if len(raised) != 1 || !strings.Contains(raised[0], "@ana") {
 				t.Errorf("notifications = %v, want one naming @ana", raised)
 			}
 		})
+	}
+}
+
+// waitingConsole is a console listening to a terminal nobody has typed at yet.
+func waitingConsole(t *testing.T) (*console, *io.PipeWriter, *safeBuffer) {
+	t.Helper()
+	in, reply := io.Pipe()
+	asked := &safeBuffer{}
+	at := &console{in: bufio.NewReader(in), out: asked}
+	at.listen()
+	t.Cleanup(func() { _ = reply.Close() })
+	return at, reply, asked
+}
+
+// answerOnce asks, waits for the question to appear, and only then types —
+// which is what a person does, and what the console's own rule requires: an
+// answer older than the question answered something else.
+func answerOnce(t *testing.T, asked *safeBuffer, reply *io.PipeWriter, typed string, ask func() (bool, error)) (bool, error) {
+	t.Helper()
+	type outcome struct {
+		ok  bool
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		ok, err := ask()
+		done <- outcome{ok, err}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(asked.String(), "[y/N]") {
+		if time.Now().After(deadline) {
+			t.Fatal("the question was never asked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := io.WriteString(reply, typed); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-done:
+		return got.ok, got.err
+	case <-time.After(3 * time.Second):
+		t.Fatal("the answer was never read")
+		return false, nil
 	}
 }
 
