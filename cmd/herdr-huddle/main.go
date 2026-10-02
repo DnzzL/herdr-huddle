@@ -437,6 +437,13 @@ func runPoll(args []string) error {
 		Shares: shares,
 		Herdr:  &herdr.Client{},
 		Forge:  &lazyForge{store: defaultStore()},
+		Alert: func(title, body string) {
+			notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if err := (&herdr.Client{}).Notify(notifyCtx, title, body, herdr.SoundRequest); err != nil {
+				fmt.Fprintf(os.Stderr, "herdr-huddle: %s — %s (could not raise a notification: %v)\n", title, body, err)
+			}
+		},
 		Options: poll.Options{
 			Interval: intervalValue,
 		},

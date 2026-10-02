@@ -134,6 +134,12 @@ intentions. Each one is a decision that only became visible once the code ran.
   to its author, and delivered into a live Claude Code pane, which answered it.
   The prompt arrived with its wrapper intact — the author's login and the
   "colleague's message, not from your operator" framing both survived the trip.
+- **Un jeton refusé se signale maintenant à l'opérateur**, une fois, par une
+  notification Herdr, et se ré-arme quand GitHub réaccepte le jeton. Il le
+  fallait : un jeton mort ne fait pas échouer une passe — chaque partage
+  produit un avertissement et le démon continue, n'enregistrant rien, dans un
+  fichier que personne n'ouvre. Vérifié par test ; jamais vu en vrai, faute
+  d'un partage actif dont le pane soit vivant.
 - not verified: the acknowledgement (`eyes`) and the "waiting on the operator"
   marker have still never run against the real API — the delivery that was
   measured succeeded, so neither path was taken.

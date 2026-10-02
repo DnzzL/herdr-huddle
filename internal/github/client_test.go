@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -235,5 +236,28 @@ func TestDecodeHelperShape(t *testing.T) {
 	}
 	if !v.Private {
 		t.Errorf("Private = false, want true")
+	}
+}
+
+// A dead token is the one failure retrying cannot fix, so callers have to be
+// able to tell it from an outage without matching on a message.
+func TestIsUnauthorized(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"a refused credential", &APIError{Status: http.StatusUnauthorized, Message: "Bad credentials"}, true},
+		{"wrapped", fmt.Errorf("reading the viewer: %w", &APIError{Status: http.StatusUnauthorized}), true},
+		{"forbidden is not the same thing", &APIError{Status: http.StatusForbidden}, false},
+		{"a rate limit is transient", &APIError{Status: http.StatusTooManyRequests, RateLimited: true}, false},
+		{"not found", ErrNotFound, false},
+		{"anything else", errors.New("dial tcp: no route to host"), false},
+		{"nothing", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsUnauthorized(c.err); got != c.want {
+			t.Errorf("%s: IsUnauthorized = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

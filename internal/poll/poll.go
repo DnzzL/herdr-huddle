@@ -94,6 +94,13 @@ type Poller struct {
 	// Log receives one line per event. A daemon with no terminal has nowhere
 	// else to say what it did.
 	Log func(format string, args ...any)
+	// Alert tells the operator something only they can fix.
+	//
+	// Logging is not telling: the poller writes to a file nobody opens, and a
+	// dead token does not even fail a pass — every share reports a warning and
+	// the daemon carries on, silently recording nothing. Optional; without it
+	// the behaviour is what it was.
+	Alert func(title, body string)
 
 	// Refused comments never advance the cursor — the operator may add the
 	// author to the allowlist and expect the next pass to deliver it — so they
@@ -101,6 +108,10 @@ type Poller struct {
 	refusedUpTo int64
 	// The same for an instruction held back while the agent is busy.
 	acknowledged int64
+	// warnedUnusable latches the credential alert. A daemon that notifies
+	// every ten seconds is a daemon the operator turns off, so it fires once
+	// and re-arms only after GitHub accepts the token again.
+	warnedUnusable bool
 }
 
 // Result is what one pass did, which is also what a test asserts on.
@@ -111,6 +122,30 @@ type Result struct {
 	Retired  []string
 	Warnings []string
 }
+
+// credentialCheck raises the one alarm the operator has to act on, once.
+//
+// It is called with every per-share failure because that is where a refused
+// credential shows up: a dead token never fails a *pass*, it fails each share
+// and leaves the daemon running with nothing to show for it.
+func (p *Poller) credentialCheck(err error) {
+	if !github.IsUnauthorized(err) {
+		return
+	}
+	if p.warnedUnusable {
+		return
+	}
+	p.warnedUnusable = true
+	p.logf("poll: GitHub no longer accepts the stored token; nothing will be recorded until `herdr-huddle auth login` runs")
+	if p.Alert != nil {
+		p.Alert("herdr-huddle: GitHub no longer accepts your token",
+			"Nothing is being recorded. Run: herdr-huddle auth login")
+	}
+}
+
+// credentialAccepted re-arms the alarm once GitHub answers normally again, so
+// a token replaced and later expired is reported a second time.
+func (p *Poller) credentialAccepted() { p.warnedUnusable = false }
 
 func (p *Poller) logf(format string, args ...any) {
 	if p.Log != nil {
@@ -219,6 +254,7 @@ func (p *Poller) Once(ctx context.Context) (Result, error) {
 			if err := p.serve(ctx, &st, agent, &out); err != nil {
 				out.Warnings = append(out.Warnings, fmt.Sprintf("%s: %v", st.Branch, err))
 				p.logf("poll: %s: %v", st.Branch, err)
+				p.credentialCheck(err)
 			}
 		}
 
@@ -386,6 +422,11 @@ func (p *Poller) deliver(ctx context.Context, st *share.State, agent herdr.Agent
 	}
 
 	comments, err := p.Forge.ListComments(ctx, owner, repo, st.Number, time.Time{}, st.Cursors.ETag)
+	if err == nil {
+		// GitHub answered, so the credential works. Re-arm the alarm here and
+		// nowhere else: a pass that merely had nothing to do proves nothing.
+		p.credentialAccepted()
+	}
 	if err != nil {
 		return fmt.Errorf("read the thread: %w", err)
 	}

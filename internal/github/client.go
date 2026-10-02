@@ -360,3 +360,14 @@ func (c *Client) HasAccess(ctx context.Context, owner, repo, login string) (bool
 		return false, err
 	}
 }
+
+// IsUnauthorized reports whether GitHub refused the credential itself.
+//
+// It exists so that callers act on the one failure a person has to fix, rather
+// than matching on a message. A dead token is not a transient fault: retrying
+// cannot help, and the poller's warnings land in a log file nobody reads, so
+// something has to be able to tell this case apart and say so out loud.
+func IsUnauthorized(err error) bool {
+	var api *APIError
+	return errors.As(err, &api) && api.Status == http.StatusUnauthorized
+}

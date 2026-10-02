@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -835,4 +836,51 @@ func TestOnce_AKindlessShareIsNotReResolved(t *testing.T) {
 func withCursor(st share.State, cursor string) share.State {
 	st.Cursors.Transcript = cursor
 	return st
+}
+
+// A dead token never fails a *pass* — every share reports a warning and the
+// daemon carries on, recording nothing, into a log file nobody opens. So it
+// has to say so where the operator will see it, exactly once.
+func TestADeadTokenIsReportedOnceAndOnlyOnce(t *testing.T) {
+	h := newHarness(t, userRecord("u1", "hello"))
+
+	var alerts []string
+	h.p.Alert = func(title, body string) { alerts = append(alerts, title+" | "+body) }
+
+	refused := &github.APIError{Status: http.StatusUnauthorized, Message: "Bad credentials"}
+	h.forge.listErr = refused
+	for i := 0; i < 3; i++ {
+		h.once() // a dead token must not stop the daemon
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want exactly one: a daemon that notifies every pass is one the operator turns off", len(alerts))
+	}
+	if !strings.Contains(alerts[0], "auth login") {
+		t.Errorf("alert %q does not say what to do about it", alerts[0])
+	}
+
+	// Once GitHub accepts the token again, the alarm re-arms: a token replaced
+	// and later expired must be reported a second time.
+	h.forge.listErr = nil
+	h.once()
+	h.forge.listErr = refused
+	h.once()
+	if len(alerts) != 2 {
+		t.Errorf("alerts = %d, want a second one after the token died again", len(alerts))
+	}
+}
+
+// Anything that is not a refused credential stays a warning: an outage is not
+// something the operator can fix by logging in again.
+func TestATransientFailureRaisesNoAlarm(t *testing.T) {
+	h := newHarness(t, userRecord("u1", "hello"))
+
+	var alerts []string
+	h.p.Alert = func(title, body string) { alerts = append(alerts, title) }
+	h.forge.listErr = &github.APIError{Status: http.StatusTooManyRequests, RateLimited: true}
+
+	h.once()
+	if len(alerts) != 0 {
+		t.Errorf("alerts = %v, want none: a rate limit is not the operator's to fix", alerts)
+	}
 }
