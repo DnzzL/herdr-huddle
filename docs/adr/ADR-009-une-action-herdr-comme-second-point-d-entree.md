@@ -52,7 +52,15 @@ Mesuré sur 0.9.0 avec un plugin jetable, invoqué par
    la même porte que le reste (ADR-008) ; le drapeau existe pour que l'action
    n'ait pas à lire la sortie du serveur.
 
-3. **Deux actions, pas davantage** : ouvrir le fil sur ce projet, ouvrir le
+3. **`serve` sert le pane d'où il a été lancé.** L'action s'intitule « sur ce
+   pane » et Herdr lui donne celui qui a le focus ; sans cela elle diffuserait
+   le partage actif du moment, c'est-à-dire l'agent de quelqu'un d'autre, et
+   par un tunnel public. `--pane` l'emporte toujours. Être dans un pane auquel
+   aucun partage n'est lié est un refus, pas un repli : diffuser un autre pane
+   en silence est la liaison erronée que `share` vient d'apprendre à refuser.
+   Hors de tout pane, l'unique partage actif reste la réponse.
+
+4. **Deux actions, pas davantage** : ouvrir le fil sur ce projet, ouvrir le
    huddle sur ce pane. `join` n'en sera pas une — il lui faut un terminal, et
    une action n'en a pas.
 

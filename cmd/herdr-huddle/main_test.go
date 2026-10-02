@@ -576,7 +576,7 @@ func TestShareForServe(t *testing.T) {
 	t.Run("one active share yields pane and allowlist", func(t *testing.T) {
 		state, err := shareForServe(write(t, retired(share.State{
 			Repo: "acme/old", Branch: "herdr/old", Origin: share.Origin{PaneID: "w1:p1"},
-		}), live), "")
+		}), live), "", "")
 		if err != nil {
 			t.Fatalf("shareForServe errored: %v", err)
 		}
@@ -589,21 +589,21 @@ func TestShareForServe(t *testing.T) {
 	})
 
 	t.Run("no shares at all", func(t *testing.T) {
-		_, err := shareForServe(share.Store{Path: filepath.Join(t.TempDir(), "none.json")}, "")
+		_, err := shareForServe(share.Store{Path: filepath.Join(t.TempDir(), "none.json")}, "", "")
 		if err == nil {
 			t.Error("serving with nothing shared must fail, not stream an ungateable pane")
 		}
 	})
 
 	t.Run("only retired shares", func(t *testing.T) {
-		_, err := shareForServe(write(t, retired(live)), "")
+		_, err := shareForServe(write(t, retired(live)), "", "")
 		if err == nil {
 			t.Error("a retired share must not be served: its agent is gone")
 		}
 	})
 
 	t.Run("several active shares are ambiguous", func(t *testing.T) {
-		_, err := shareForServe(write(t, live, other), "")
+		_, err := shareForServe(write(t, live, other), "", "")
 		if err == nil {
 			t.Fatal("with two active shares the pane is ambiguous, so it must fail")
 		}
@@ -613,7 +613,7 @@ func TestShareForServe(t *testing.T) {
 	})
 
 	t.Run("--pane picks the share", func(t *testing.T) {
-		state, err := shareForServe(write(t, live, other), "wP:p1")
+		state, err := shareForServe(write(t, live, other), "wP:p1", "")
 		if err != nil {
 			t.Fatalf("shareForServe errored: %v", err)
 		}
@@ -623,14 +623,14 @@ func TestShareForServe(t *testing.T) {
 	})
 
 	t.Run("--pane matching no share", func(t *testing.T) {
-		_, err := shareForServe(write(t, live), "w99:p9")
+		_, err := shareForServe(write(t, live), "w99:p9", "")
 		if err == nil {
 			t.Error("a pane no share is bound to has no allowlist, so it must fail")
 		}
 	})
 
 	t.Run("an active share with no pane", func(t *testing.T) {
-		_, err := shareForServe(write(t, share.State{Repo: "acme/demo", Branch: "herdr/demo"}), "")
+		_, err := shareForServe(write(t, share.State{Repo: "acme/demo", Branch: "herdr/demo"}), "", "")
 		if err == nil {
 			t.Error("a share opened outside a pane has nothing to stream")
 		}
@@ -967,5 +967,70 @@ func TestShareRefusesAnAgentFromAnotherProject(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The `huddle` action is titled "on this pane", and an action knows which pane
+// has focus — so `serve` must prefer it. Without this it streams whichever
+// share happens to be active, which on a machine with an old share means
+// opening a public tunnel onto a pane that no longer exists.
+func TestServePrefersThePaneItWasInvokedFrom(t *testing.T) {
+	live := func(repoName, pane string) share.State {
+		return share.State{Repo: "acme/" + repoName, Branch: "herdr/" + repoName, Number: 1,
+			Origin: share.Origin{PaneID: pane}}
+	}
+	store := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	for _, st := range []share.State{live("one", "w1:p1"), live("two", "w2:p1")} {
+		if err := store.Put(st); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Two active shares and no hint: still ambiguous, and the error says how
+	// to resolve it.
+	if _, err := shareForServe(store, "", ""); err == nil {
+		t.Error("two shares and no pane must stay ambiguous")
+	}
+
+	// Invoked from a pane that has one: that one, with no flag.
+	got, err := shareForServe(store, "", "w2:p1")
+	if err != nil {
+		t.Fatalf("a pane with a share must resolve it: %v", err)
+	}
+	if got.Repo != "acme/two" {
+		t.Errorf("served %s, want the share bound to the pane invoked from", got.Repo)
+	}
+
+	// An explicit flag still wins over where it was invoked.
+	got, err = shareForServe(store, "w1:p1", "w2:p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repo != "acme/one" {
+		t.Errorf("served %s, want --pane to win", got.Repo)
+	}
+
+	// Invoked from a pane with no share of its own: refuse. Being in a pane is
+	// a request for that pane, and quietly streaming a different agent over a
+	// public tunnel is the mis-binding `share` was just taught to refuse.
+	single := share.Store{Path: filepath.Join(t.TempDir(), "shares.json")}
+	if err := single.Put(live("only", "w5:p1")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = shareForServe(single, "", "w9:p9")
+	if err == nil {
+		t.Fatal("a pane with no share must not silently stream another one")
+	}
+	if !strings.Contains(err.Error(), "w9:p9") {
+		t.Errorf("error %q does not name the pane that has no share", err)
+	}
+
+	// Outside a pane entirely, the single active share is still the answer.
+	got, err = shareForServe(single, "", "")
+	if err != nil {
+		t.Fatalf("outside a pane, one share must still serve: %v", err)
+	}
+	if got.Repo != "acme/only" {
+		t.Errorf("served %s, want the only share", got.Repo)
 	}
 }

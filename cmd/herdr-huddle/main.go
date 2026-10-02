@@ -545,13 +545,21 @@ func runServe(args []string) error {
 		return fmt.Errorf("%w: --open and --closed are opposite doors; pass at most one", errUsage)
 	}
 
-	state, err := shareForServe(shareStore(), *pane)
+	ctx, stop := withSignals()
+	defer stop()
+
+	// The pane this was invoked from, when it was not told which to stream.
+	// An action has one; a shell in a pane has one too.
+	invokedFrom := ""
+	if *pane == "" {
+		what, _ := target.Resolve(ctx, ".", &herdr.Client{}, target.GitRoots{})
+		invokedFrom = what.PaneID
+	}
+
+	state, err := shareForServe(shareStore(), *pane, invokedFrom)
 	if err != nil {
 		return err
 	}
-
-	ctx, stop := withSignals()
-	defer stop()
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -952,7 +960,7 @@ func announceJoinLine(ctx context.Context, endpoint string, logf func(string, ..
 // no share behind it has nothing to gate with and is refused here rather than
 // served open. --pane picks which share when several are active; it never
 // invents one.
-func shareForServe(store share.Store, pane string) (share.State, error) {
+func shareForServe(store share.Store, pane, invokedFrom string) (share.State, error) {
 	states, err := store.Load()
 	if err != nil {
 		return share.State{}, err
@@ -981,6 +989,27 @@ func shareForServe(store share.Store, pane string) (share.State, error) {
 		}
 	}
 
+	// Where the command was invoked from, when it was not told. A Herdr action
+	// is titled "on this pane" and knows which one has focus, so preferring it
+	// is what makes the title true; without it the action streams whichever
+	// share happens to be active (ADR-009).
+	if invokedFrom != "" {
+		var here []share.State
+		for _, state := range active {
+			if state.Origin.PaneID == invokedFrom {
+				here = append(here, state)
+			}
+		}
+		if len(here) == 1 {
+			return here[0], nil
+		}
+		// Being in a pane is itself a request for *that* pane. Falling back to
+		// whichever share happens to be active would stream somebody else's
+		// agent — the same silent mis-binding `share` was just taught to
+		// refuse, and over a public tunnel.
+		return share.State{}, fmt.Errorf("no active share is bound to pane %s, so there is nothing to stream here: run `share` from this pane first, or pass --pane to stream another", invokedFrom)
+	}
+
 	switch len(active) {
 	case 1:
 		return active[0], nil
@@ -991,7 +1020,7 @@ func shareForServe(store share.Store, pane string) (share.State, error) {
 		for _, state := range active {
 			panes = append(panes, state.Origin.PaneID)
 		}
-		return share.State{}, fmt.Errorf("more than one active share is bound to a pane (%s), so which to stream is ambiguous: pass --pane", strings.Join(panes, ", "))
+		return share.State{}, fmt.Errorf("more than one active share is bound to a pane (%s), so which to stream is ambiguous: run this from the agent's pane, or pass --pane", strings.Join(panes, ", "))
 	}
 }
 
