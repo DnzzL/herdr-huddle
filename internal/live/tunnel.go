@@ -113,6 +113,16 @@ func StartTunnel(ctx context.Context, bin, localURL string) (*Tunnel, error) {
 		case <-scanDone:
 		case <-time.After(200 * time.Millisecond):
 		}
+		// The URL may well have been printed in the breath before it died.
+		// Saying it never was sends the operator hunting the wrong fault —
+		// a missing URL means "this binary is not cloudflared", a printed one
+		// means "the tunnel came up and collapsed", and those are not fixed
+		// the same way.
+		select {
+		case url := <-urlCh:
+			return nil, fmt.Errorf("live: %s printed %s and then exited, so that tunnel is already gone%s", bin, url, tail.String())
+		default:
+		}
 		if tunnel.waitErr == nil {
 			return nil, fmt.Errorf("live: %s exited without printing a tunnel URL%s", bin, tail.String())
 		}

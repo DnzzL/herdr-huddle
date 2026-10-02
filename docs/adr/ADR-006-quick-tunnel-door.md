@@ -111,7 +111,12 @@ transiently with `nix run`; local origin on `127.0.0.1:8791`):
   cloudflared version. Not portable to Cloudflare zones (which have their own
   settings) or to other relays.
 - **No panic path for a flapping tunnel:** if `cloudflared` dies mid-session,
-  `serve` currently has no defined behaviour (restart, report, or exit) — undecided.
+  `serve` currently has no defined behaviour (restart, report, or exit) —
+  undecided. `Tunnel.done` exists and nothing watches it, so `serve` can also
+  advertise a URL whose process died in the instant after `StartTunnel`
+  returned. The error path at least no longer claims the binary printed
+  nothing when it printed a URL and then collapsed; the success path makes no
+  such check.
 - **Tokens can die and nothing refreshes them.** GitHub may issue expiring
   access tokens (8 hours); when the stored one expires, `join` and `poll` both
   fail until `auth login` runs again. The gate reports this honestly but has no

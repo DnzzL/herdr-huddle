@@ -102,7 +102,11 @@ func TestStartTunnelReportsAMissingBinary(t *testing.T) {
 // The binary comes from the environment first, like every other child process
 // in this tool, so a machine without it on PATH can still be tested.
 func TestStartTunnelTakesTheBinaryFromTheEnvironment(t *testing.T) {
-	bin := fakeCloudflared(t, `printf '%s\n' 'https://env-override.trycloudflare.com'`)
+	// The fake stays alive, as a real tunnel does: a cloudflared that prints a
+	// URL and exits has not started a tunnel, it has lost one, and this test
+	// is about which binary was run.
+	bin := fakeCloudflared(t, `printf '%s\n' 'https://env-override.trycloudflare.com'
+exec sleep 30`)
 	t.Setenv("HERDR_HUDDLE_CLOUDFLARED", bin)
 	tunnel, err := StartTunnel(context.Background(), "", "http://127.0.0.1:8791")
 	if err != nil {
@@ -132,5 +136,19 @@ exec sleep 30
 	case <-tunnel.done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the cloudflared child outlived its context")
+	}
+}
+
+// A binary that prints nothing and exits is not cloudflared, and the message
+// has to say that rather than something vaguer.
+func TestATunnelThatPrintsNothingSaysSo(t *testing.T) {
+	bin := fakeCloudflared(t, `exit 0`)
+
+	_, err := StartTunnel(context.Background(), bin, "http://127.0.0.1:8791")
+	if err == nil {
+		t.Fatal("a binary that printed no URL must not be reported as a tunnel")
+	}
+	if !strings.Contains(err.Error(), "without printing a tunnel URL") {
+		t.Errorf("error = %v, want it to say nothing was printed", err)
 	}
 }
