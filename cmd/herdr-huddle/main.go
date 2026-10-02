@@ -1175,21 +1175,31 @@ func printPollResult(w io.Writer, out poll.Result) {
 // printShareResult reports what happened, in the order the pieces came into
 // existence, so a failure partway through is legible.
 func printShareResult(w io.Writer, res share.Result) {
+	// This is printed on the failure path too, so every line has to be true of
+	// what actually happened. A share that stopped at the base branch used to
+	// report a branch "reused" and pull request "#0 (created)" — sending the
+	// operator to look for neither.
 	verb := "created"
 	if res.Reused {
 		verb = "reused"
 	}
 	pr := fmt.Sprintf("#%d %s (%s, %s)", res.PullRequest.Number, res.PullRequest.HTMLURL, draftLabel(res.PullRequest.Draft), verb)
-	if res.DryRun {
+	switch {
+	case res.DryRun:
 		pr = "would be opened"
+	case res.PullRequest.Number == 0:
+		pr = "not opened"
 	}
 	base := res.Base
 	if base == "" {
 		base = "(unknown)"
 	}
-	branch := res.Branch + " (reused)"
-	if res.BranchCreated {
+	branch := res.Branch + " (not created)"
+	switch {
+	case res.BranchCreated:
 		branch = res.Branch + " (created)"
+	case res.Pushed, res.DryRun:
+		branch = res.Branch + " (reused)"
 	}
 
 	fmt.Fprintf(w, "repo      %s\n", res.Repo)
@@ -1362,8 +1372,8 @@ func resolveClientID() string {
 	return strings.TrimSpace(clientID)
 }
 
-// defaultStore keeps state where Herdr gives plugins a config directory, so the
-// CLI and the plugin's hooks agree on where the token lives.
+// defaultStore keeps the token in one place, so the CLI and the plugin's hooks
+// agree on where it lives whoever started them.
 func defaultStore() *auth.TokenStore {
 	return &auth.TokenStore{
 		Service:     serviceName,
@@ -1373,7 +1383,12 @@ func defaultStore() *auth.TokenStore {
 }
 
 func configDir() string {
-	if d := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); d != "" {
+	// Deliberately not HERDR_PLUGIN_CONFIG_DIR. Herdr sets that for a plugin
+	// action and for the startup hook, and not for a shell — so honouring it
+	// put the token `auth login` wrote somewhere the poller never looked
+	// (ADR-009). One directory, whoever is asking; this override exists for
+	// tests and for anyone who wants to move it deliberately.
+	if d := os.Getenv("HERDR_HUDDLE_CONFIG_DIR"); d != "" {
 		return d
 	}
 	if d, err := os.UserConfigDir(); err == nil {

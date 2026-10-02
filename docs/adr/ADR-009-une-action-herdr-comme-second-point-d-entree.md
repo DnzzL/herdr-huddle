@@ -90,11 +90,33 @@ Mesuré sur 0.9.0 avec un plugin jetable, invoqué par
   « running » et ne la redémarre pas — le manque d'ADR-005 reste entier, et
   s'affiche désormais dans l'interface.
 
+## Addendum — un seul répertoire de configuration
+
+Lier le plugin et déclencher les actions a révélé un défaut qui n'était resté
+invisible que parce que personne ne l'avait jamais lié. `configDir()` préférait
+`HERDR_PLUGIN_CONFIG_DIR`, que Herdr fournit à une action et au hook de
+démarrage mais jamais à un shell. Le jeton écrit par `auth login` allait donc
+dans `~/.config/herdr-huddle`, tandis que le poller lancé par le plugin lisait
+un répertoire vide de Herdr. La raison d'être du plugin — un poller qui tient
+les fils à jour — n'aurait jamais pu fonctionner.
+
+La variable honorée est désormais `HERDR_HUDDLE_CONFIG_DIR`, dans notre propre
+espace de noms comme `HERDR_HUDDLE_CLIENT_ID`. Les deux appelants retombent sur
+le même répertoire, celui où l'état vit déjà : aucune migration.
+
+Le même essai a montré que `printShareResult`, imprimé aussi sur le chemin
+d'échec, annonçait une branche « reused » et une pull request « #0 (created) »
+alors qu'un partage arrêté au choix de la branche de base n'avait touché ni
+l'une ni l'autre. Chaque ligne n'affirme plus que ce qui a eu lieu.
+
 ## Known gaps
 
-- not tested : les actions n'ont été invoquées que par `herdr plugin action
-  invoke`. Le chemin clavier et la valeur de `focused_pane_id` quand le focus
-  change entre l'appui et l'exécution n'ont pas été mesurés.
+- not tested : les actions ont été déclenchées par `herdr plugin action invoke`
+  sur le plugin réel. Le chemin clavier, et la valeur de `focused_pane_id` quand
+  le focus change entre l'appui et l'exécution, restent non mesurés.
+- not tested : le chemin heureux des deux actions. Le jeton de la machine
+  répond `401`, et `auth login` passe par un navigateur — les deux se sont donc
+  arrêtées exactement là où elles le devaient, sans rien créer.
 - not done : rien ne relie une URL de pull request à son partage, donc pas de
   gestionnaire de liens.
 - unknown : ce que devient une action `serve` quand le serveur Herdr redémarre.

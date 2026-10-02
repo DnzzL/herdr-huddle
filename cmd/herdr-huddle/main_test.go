@@ -75,14 +75,14 @@ func TestSplitRepo(t *testing.T) {
 // login would be invisible to the poller.
 func TestConfigDirPrefersHerdrPluginConfigDir(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", dir)
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", dir)
 	if got := configDir(); got != dir {
 		t.Errorf("configDir() = %q, want %q", got, dir)
 	}
 }
 
 func TestConfigDirFallsBackToUserConfigDir(t *testing.T) {
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", "")
 	if got := configDir(); !strings.HasSuffix(got, serviceName) {
 		t.Errorf("configDir() = %q, want it to end with %q", got, serviceName)
 	}
@@ -125,7 +125,7 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 // The token file must land in the config directory the plugin also uses.
 func TestDefaultStoreUsesConfigDir(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", dir)
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", dir)
 	store := defaultStore()
 	if store.FallbackDir != dir {
 		t.Errorf("FallbackDir = %q, want %q", store.FallbackDir, dir)
@@ -231,7 +231,7 @@ func TestStringListFlag(t *testing.T) {
 func TestRunShareDryRunNeedsNoToken(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", t.TempDir())
 
 	dir := t.TempDir()
 	git := func(args ...string) {
@@ -269,7 +269,7 @@ func TestRunShareDryRunNeedsNoToken(t *testing.T) {
 		t.Fatalf("a dry run must not require a token: %v", err)
 	}
 	// And it must not have recorded a share for the poller.
-	store := share.Store{Path: filepath.Join(os.Getenv("HERDR_PLUGIN_CONFIG_DIR"), "shares.json")}
+	store := share.Store{Path: filepath.Join(os.Getenv("HERDR_HUDDLE_CONFIG_DIR"), "shares.json")}
 	if states, err := store.Load(); err != nil || len(states) != 0 {
 		t.Errorf("a dry run recorded shares: %v, %v", states, err)
 	}
@@ -429,7 +429,7 @@ func TestLazyForgeNeedsNoTokenUntilItIsUsed(t *testing.T) {
 	// working after it rather than needing a restart.
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", t.TempDir())
 
 	forge := &lazyForge{store: defaultStore()}
 	if _, err := forge.load(context.Background()); err == nil {
@@ -499,7 +499,7 @@ func TestLocalOriginAgainstTheLiveAgent(t *testing.T) {
 func TestRunPollOnceWithNothingToDo(t *testing.T) {
 	// No shares and no token: a one-shot poll must say so rather than demand a
 	// login for work that does not exist.
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", t.TempDir())
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
 
@@ -514,7 +514,7 @@ func TestRunPollOnceWithNothingToDo(t *testing.T) {
 }
 
 func TestRunPollRejectsPositionalArguments(t *testing.T) {
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", t.TempDir())
 	err := runPoll([]string{"extra"})
 	if !errors.Is(err, errUsage) {
 		t.Errorf("err = %v, want a usage error", err)
@@ -1032,5 +1032,77 @@ func TestServePrefersThePaneItWasInvokedFrom(t *testing.T) {
 	}
 	if got.Repo != "acme/only" {
 		t.Errorf("served %s, want the only share", got.Repo)
+	}
+}
+
+// The token and the share records must live in one place, whoever is asking.
+//
+// They did not. configDir() preferred HERDR_PLUGIN_CONFIG_DIR, which Herdr
+// sets for a plugin action and for the startup hook but not for a shell — so
+// `auth login` wrote to ~/.config/herdr-huddle while the poller the plugin
+// started read an empty directory of Herdr's. The plugin's whole point, a
+// poller keeping threads in step, could never have worked.
+func TestTheConfigDirDoesNotMoveWhenHerdrIsTheCaller(t *testing.T) {
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", "")
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
+	fromShell := configDir()
+
+	// Exactly what Herdr passes a plugin action and the startup hook.
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "/home/user/.config/herdr/plugins/config/dnzzl.herdr-huddle")
+	fromHerdr := configDir()
+
+	if fromShell != fromHerdr {
+		t.Errorf("the shell reads %s and Herdr reads %s: the token and the shares would never meet", fromShell, fromHerdr)
+	}
+
+	// Our own override still works, because the tests depend on it.
+	t.Setenv("HERDR_HUDDLE_CONFIG_DIR", "/tmp/elsewhere")
+	if got := configDir(); got != "/tmp/elsewhere" {
+		t.Errorf("configDir = %q, want the explicit override", got)
+	}
+}
+
+// The result is printed even when the share failed, so no line may claim
+// something that did not happen. A share that stopped at the base branch used
+// to report a branch "reused" and pull request "#0 (created)", sending the
+// operator looking for neither.
+func TestPrintShareResultNeverClaimsWhatDidNotHappen(t *testing.T) {
+	var out bytes.Buffer
+	// Exactly the shape of a share that failed before touching git: the branch
+	// name is computed, nothing else is.
+	printShareResult(&out, share.Result{
+		Repo:   repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"},
+		Branch: "herdr/demo",
+	})
+	got := out.String()
+	if !strings.Contains(got, "herdr/demo (not created)") {
+		t.Errorf("output claims a branch that was never touched:\n%s", got)
+	}
+	if !strings.Contains(got, "pull      not opened") {
+		t.Errorf("output claims a pull request that does not exist:\n%s", got)
+	}
+	if strings.Contains(got, "#0") {
+		t.Errorf("output offers #0 as a pull request number:\n%s", got)
+	}
+
+	// And the paths that did happen still read as before.
+	out.Reset()
+	printShareResult(&out, share.Result{
+		Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/demo",
+		BranchCreated: true, Pushed: true,
+		PullRequest: github.PullRequest{Number: 7, HTMLURL: "https://example.invalid/7", Draft: true},
+	})
+	if got := out.String(); !strings.Contains(got, "(created)") || !strings.Contains(got, "#7") {
+		t.Errorf("a real share must still report itself:\n%s", got)
+	}
+
+	out.Reset()
+	printShareResult(&out, share.Result{
+		Repo: repo.Slug{Host: "github.com", Owner: "acme", Name: "demo"}, Branch: "herdr/demo",
+		Pushed: true, Reused: true,
+		PullRequest: github.PullRequest{Number: 7, HTMLURL: "https://example.invalid/7"},
+	})
+	if got := out.String(); !strings.Contains(got, "(reused)") {
+		t.Errorf("a resumed share must still read as reused:\n%s", got)
 	}
 }
