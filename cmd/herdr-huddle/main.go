@@ -29,6 +29,7 @@ import (
 	"github.com/DnzzL/herdr-huddle/internal/repo"
 	"github.com/DnzzL/herdr-huddle/internal/session"
 	"github.com/DnzzL/herdr-huddle/internal/share"
+	"github.com/DnzzL/herdr-huddle/internal/target"
 	"github.com/DnzzL/herdr-huddle/internal/thread"
 	"github.com/DnzzL/herdr-huddle/internal/tui"
 )
@@ -160,6 +161,9 @@ Serve and join:
            --moderated   put every instruction to you, with the words in front
                          of you, before the agent sees it. Letting somebody in
                          and letting them drive stop being one decision.
+           --notify      announce the join line as a Herdr notification. For
+                         the plugin action, whose output only reaches
+                         herdr plugin log.
            By default the door knocks: somebody who is not on the allowlist
            yet proves who they are on GitHub, you are asked here, and one
            keypress lets them in for good — their pull-request comments
@@ -223,9 +227,24 @@ func runShare(args []string) error {
 		return err
 	}
 
+	// What this acts on, asked rather than guessed (ADR-009). Invoked as a
+	// Herdr action the working directory is the plugin's, so the pane is the
+	// only source that can be right.
+	what, targetWarnings := target.Resolve(ctx, dir, &herdr.Client{}, target.GitRoots{})
+	for _, warning := range targetWarnings {
+		fmt.Fprintf(os.Stdout, "warning   %s\n", warning)
+	}
+	if what.Root != "" {
+		dir = what.Root
+	}
+	if what.FromPane {
+		fmt.Printf("project   %s (from the agent in pane %s)\n", what.Root, what.PaneID)
+	}
+
 	// Before anything is created: the agent is read first and checked against
-	// this repository, because a mismatch discovered after the push is a
-	// branch and a pull request nobody asked for.
+	// the project, because a mismatch discovered after the push is a branch
+	// and a pull request nobody asked for. Resolve makes the two agree by
+	// construction; this stays as the assertion that it did.
 	origin, warnings := localOrigin(ctx)
 	for _, warning := range warnings {
 		fmt.Fprintf(os.Stdout, "warning   %s\n", warning)
@@ -515,6 +534,7 @@ func runServe(args []string) error {
 	open := fs.Bool("open", false, "let anyone with a GitHub identity in, without asking")
 	closed := fs.Bool("closed", false, "the allowlist or nothing: never ask, never knock")
 	moderated := fs.Bool("moderated", false, "approve every instruction before it reaches the agent")
+	notify := fs.Bool("notify", false, "announce the join line as a Herdr notification (for a plugin action, whose output nobody sees)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -570,9 +590,16 @@ func runServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "herdr-huddle: moderated — every instruction is put to you before the agent sees it\n")
 	}
 
+	announce := func(endpoint string) {
+		if *notify {
+			announceJoinLine(ctx, endpoint, logf)
+		}
+	}
+
 	switch {
 	case *noTunnel:
 		printJoinLine("join from this machine:", ln.Addr().String())
+		announce(ln.Addr().String())
 	default:
 		fmt.Fprintf(os.Stderr, "herdr-huddle: starting a tunnel…\n")
 		tunnel, err := live.StartTunnel(ctx, "", "http://"+ln.Addr().String())
@@ -580,13 +607,16 @@ func runServe(args []string) error {
 		case err == nil:
 			defer func() { _ = tunnel.Close() }()
 			printJoinLine("live share ready — send them:", tunnel.URL)
+			announce(tunnel.URL)
 		case errors.Is(err, live.ErrTunnelBinaryMissing):
 			fmt.Fprintf(os.Stderr, "herdr-huddle: cloudflared is not installed, so this share is local only.\n"+
 				"  install it (nix profile install nixpkgs#cloudflared, or environment.systemPackages = [ pkgs.cloudflared ]) and re-run for a link to send.\n")
 			printJoinLine("join from this machine:", ln.Addr().String())
+			announce(ln.Addr().String())
 		default:
 			fmt.Fprintf(os.Stderr, "herdr-huddle: no tunnel: %v\n", err)
 			printJoinLine("join from this machine:", ln.Addr().String())
+			announce(ln.Addr().String())
 		}
 	}
 	return server.Serve(ctx, ln)
@@ -895,6 +925,24 @@ func spoolName(key string) string {
 // to send, one to run.
 func printJoinLine(what, endpoint string) {
 	fmt.Fprintf(os.Stderr, "herdr-huddle: %s\n  herdr-huddle join %s\n", what, endpoint)
+}
+
+// announceJoinLine puts the same line on the operator's screen.
+//
+// A plugin action's output goes to `herdr plugin log` and nowhere else
+// (ADR-009), so a huddle opened that way would be a tunnel whose URL nobody
+// ever reads. A failure is logged and no more: the line is still on stderr for
+// whoever can see stderr.
+func announceJoinLine(ctx context.Context, endpoint string, logf func(string, ...any)) {
+	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := (&herdr.Client{}).Notify(notifyCtx,
+		"herdr-huddle: the huddle is open",
+		"herdr-huddle join "+endpoint,
+		herdr.SoundDone)
+	if err != nil {
+		logf("could not announce the join line: %v", err)
+	}
 }
 
 // shareForServe resolves the pane *and* the gate from one active share.

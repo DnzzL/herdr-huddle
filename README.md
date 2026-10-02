@@ -124,11 +124,18 @@ keychain, scoped to the narrowest thing that works: `public_repo` for a public
 repository, `repo` for a private one. `GH_TOKEN` and `GITHUB_TOKEN` are honoured
 first if you already have one.
 
-**4. Open a share from inside the pane** whose agent you want to share:
+**4. Open a share from the pane** whose agent you want to share:
 
 ```
 ./bin/herdr-huddle share
 ```
+
+Or, once the plugin is linked, from Herdr itself: the plugin adds two actions,
+**ouvrir le fil de ce projet** and **ouvrir le huddle sur ce pane**. An action
+knows which pane has focus and which project it works in, so it does not depend
+on where your shell happens to be — and the huddle's join line arrives as a
+Herdr notification, because an action's output only ever reaches
+`herdr plugin log`.
 
 That is the thread. `--invite @user` is optional — it gives someone repository
 read access and puts them on the allowlist ahead of time, which is useful for a
@@ -273,7 +280,7 @@ herdr-huddle auth status
 herdr-huddle auth logout
 herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
 herdr-huddle poll [--once] [--interval 10s]
-herdr-huddle serve [--pane id] [--open | --closed] [--moderated] [--no-tunnel] [--addr host:port] [--cols n] [--rows n]
+herdr-huddle serve [--pane id] [--open | --closed] [--moderated] [--notify] [--no-tunnel] [--addr host:port]
 herdr-huddle join [address] [--addr 127.0.0.1:8787]
 ```
 

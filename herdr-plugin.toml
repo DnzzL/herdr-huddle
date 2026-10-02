@@ -24,3 +24,23 @@ platforms = ["linux", "macos"]
 # and exits — see hooks/startup.sh and docs/adr/ADR-001.
 [[startup]]
 command = ["/bin/sh", "hooks/startup.sh"]
+
+# Deux points d'entrée dans l'interface de Herdr, parce qu'une action arrive
+# avec le pane et le projet que la ligne de commande doit deviner (ADR-009).
+# Le répertoire courant d'une action est la racine du plugin, jamais celle du
+# projet : les deux commandes résolvent leur cible depuis le pane.
+[[actions]]
+id = "share"
+title = "Herdr Huddle: ouvrir le fil de ce projet"
+contexts = ["workspace"]
+command = ["bin/herdr-huddle", "share"]
+platforms = ["linux", "macos"]
+
+# --notify parce que la sortie d'une action ne va qu'au journal du plugin :
+# sans lui, le lien de jointure n'atteindrait personne.
+[[actions]]
+id = "huddle"
+title = "Herdr Huddle: ouvrir le huddle sur ce pane"
+contexts = ["workspace"]
+command = ["bin/herdr-huddle", "serve", "--notify"]
+platforms = ["linux", "macos"]

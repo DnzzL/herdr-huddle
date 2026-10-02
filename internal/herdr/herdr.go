@@ -369,7 +369,12 @@ func truncateForError(raw []byte) string {
 // SoundRequest is the sound `herdr notification show --sound` plays for
 // something waiting on a person. The vocabulary is Herdr's, not ours, and this
 // is the one of its sounds that means what our questions mean.
-const SoundRequest = "request"
+const (
+	SoundRequest = "request"
+	// SoundDone is Herdr's sound for something that finished rather than
+	// something waiting on a person.
+	SoundDone = "done"
+)
 
 // Notify raises a notification on the operator's own screen.
 //
