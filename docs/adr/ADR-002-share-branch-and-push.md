@@ -77,6 +77,24 @@ these are worth pinning before the code exists.
   and skipped by `--dry-run` because a dry run makes no requests at all. A dry
   run therefore reports the base as unknown when local refs cannot say.
 
+## Addendum — un partage refuse un agent d'un autre projet
+
+`share` lisait le dépôt dans le répertoire courant du processus et l'agent dans
+`HERDR_PANE_ID`, sans jamais comparer les deux. Lancé depuis le pane d'un
+projet alors que l'agent visé travaille dans un autre, il ouvrait une pull
+request sur un dépôt en la liant à un agent d'un second — en silence, et le fil
+se remplissait d'une conversation portant sur du code qu'il ne contient pas.
+
+`Origin` porte désormais `Root`, la racine de worktree de l'agent, et `share`
+refuse quand elle diffère de celle du dépôt. Un worktree du même dépôt compte
+comme un autre projet : c'est une autre branche, donc un autre fil (ADR-007).
+
+Le contrôle passe avant `share.Open` : découvert après coup, il laisserait
+derrière lui une branche poussée et une pull request dont personne ne voulait.
+Hors pane, rien ne change — l'avertissement existant couvre déjà ce cas, et
+refuser sur « je n'ai pas pu savoir » bloquerait les agents que herdr-huddle
+aide le moins.
+
 ## Known gaps
 
 - not covered by a test: the branch, empty commit, base selection, idempotency

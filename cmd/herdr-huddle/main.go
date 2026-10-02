@@ -223,6 +223,19 @@ func runShare(args []string) error {
 		return err
 	}
 
+	// Before anything is created: the agent is read first and checked against
+	// this repository, because a mismatch discovered after the push is a
+	// branch and a pull request nobody asked for.
+	origin, warnings := localOrigin(ctx)
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stdout, "warning   %s\n", warning)
+	}
+	if root, rootErr := (&repo.Repo{Dir: dir}).Root(ctx); rootErr == nil {
+		if err := refuseForeignAgent(root, origin); err != nil {
+			return err
+		}
+	}
+
 	result, err := share.Open(ctx, &repo.Repo{Dir: dir}, &github.Client{Token: token}, share.Request{
 		Slug:   *slug,
 		Base:   *base,
@@ -245,11 +258,6 @@ func runShare(args []string) error {
 
 	// The poller reads this. A failure to record the share is reported but does
 	// not undo the pull request that now exists.
-	origin, warnings := localOrigin(ctx)
-	for _, warning := range warnings {
-		fmt.Fprintf(os.Stdout, "warning   %s\n", warning)
-	}
-
 	store := shareStore()
 	state, resumed, err := recordShare(store, result, origin, time.Now())
 	if err != nil {
@@ -296,6 +304,15 @@ func localOrigin(ctx context.Context) (share.Origin, []string) {
 	if origin.PaneID == "" {
 		origin.PaneID = pane
 	}
+	// Which project the agent is in, as git sees it. A directory that is not a
+	// repository leaves this empty, and the share is let through unchecked —
+	// refusing on "I could not tell" would block the agents herdr-huddle is
+	// least able to help.
+	if agent.CWD != "" {
+		if root, err := (&repo.Repo{Dir: agent.CWD}).Root(ctx); err == nil {
+			origin.Root = root
+		}
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -315,6 +332,29 @@ func localOrigin(ctx context.Context) (share.Origin, []string) {
 		return origin, nil
 	}
 	return origin, []string{"no session file was found for this pane: " + src.Reason}
+}
+
+// refuseForeignAgent stops a share whose agent works in another project.
+//
+// `share` reads the repository from the process's working directory and the
+// agent from the pane it runs in. Those are the same thing only by convention
+// — run it from one project's pane while the agent works in another and you
+// get a pull request on one repository bound to an agent in a second, with no
+// sign that anything is wrong until the thread fills with a conversation about
+// code it does not contain.
+//
+// A worktree of the same repository counts as another project: it is another
+// branch, so another thread (ADR-007's scope).
+func refuseForeignAgent(repoRoot string, origin share.Origin) error {
+	if origin.Root == "" || repoRoot == "" {
+		return nil // no pane, or a directory git knows nothing about
+	}
+	if filepath.Clean(origin.Root) == filepath.Clean(repoRoot) {
+		return nil
+	}
+	return fmt.Errorf("the agent in pane %s works in %s, but this would open the thread on %s.\n"+
+		"  A share binds one agent to one pull request, so run `share` from the agent's own project",
+		origin.PaneID, origin.Root, repoRoot)
 }
 
 // recordShare stores a share for the poller, bound to the origin it was opened

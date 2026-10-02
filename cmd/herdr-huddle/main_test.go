@@ -261,6 +261,10 @@ func TestRunShareDryRunNeedsNoToken(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chdir(wd) })
 
+	// Without this the test inherits whatever pane it happens to run in, and
+	// `share` rightly refuses to bind that agent to this temporary repository.
+	t.Setenv("HERDR_PANE_ID", "")
+
 	if err := runShare([]string{"--dry-run"}); err != nil {
 		t.Fatalf("a dry run must not require a token: %v", err)
 	}
@@ -894,5 +898,70 @@ func TestSpoolNameFlattensAwkwardKeys(t *testing.T) {
 	}
 	if spoolName("acme/demo#a") == spoolName("acme/demo#b") {
 		t.Error("two different shares flattened to one name")
+	}
+}
+
+// `share` reads the repository from the process's working directory and the
+// agent from HERDR_PANE_ID. Nothing used to compare them, so running it from
+// one project's pane while the agent worked in another opened a pull request
+// on one repository bound to an agent in a second — silently, and the thread
+// then recorded a conversation about code it does not contain.
+func TestShareRefusesAnAgentFromAnotherProject(t *testing.T) {
+	cases := []struct {
+		name     string
+		repoRoot string
+		origin   share.Origin
+		wantErr  bool
+	}{
+		{
+			name:     "the agent works in this repository",
+			repoRoot: "/home/user/Projects/demo",
+			origin:   share.Origin{PaneID: "w1:p1", Root: "/home/user/Projects/demo", CWD: "/home/user/Projects/demo/internal"},
+		},
+		{
+			name:     "a trailing slash is not another project",
+			repoRoot: "/home/user/Projects/demo/",
+			origin:   share.Origin{PaneID: "w1:p1", Root: "/home/user/Projects/demo"},
+		},
+		{
+			name:     "the agent works somewhere else entirely",
+			repoRoot: "/home/user/Projects/demo",
+			origin:   share.Origin{PaneID: "w1:p1", Root: "/home/user/Projects/other", CWD: "/home/user/Projects/other"},
+			wantErr:  true,
+		},
+		{
+			name:     "a worktree of the same repository is still another project",
+			repoRoot: "/home/user/Projects/demo",
+			origin:   share.Origin{PaneID: "w1:p1", Root: "/home/user/.herdr/worktrees/demo/feature", CWD: "/home/user/.herdr/worktrees/demo/feature"},
+			wantErr:  true,
+		},
+		{
+			name:     "no pane: already warned about, and not ours to refuse",
+			repoRoot: "/home/user/Projects/demo",
+			origin:   share.Origin{},
+		},
+		{
+			name:     "the agent's directory is not a repository at all",
+			repoRoot: "/home/user/Projects/demo",
+			origin:   share.Origin{PaneID: "w1:p1", CWD: "/tmp"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := refuseForeignAgent(c.repoRoot, c.origin)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("refuseForeignAgent = %v, wantErr %v", err, c.wantErr)
+			}
+			if err == nil {
+				return
+			}
+			// The message has to name both sides, or the operator cannot tell
+			// which of the two is the one they got wrong.
+			for _, want := range []string{c.origin.Root, c.repoRoot, c.origin.PaneID} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
 	}
 }

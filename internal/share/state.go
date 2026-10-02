@@ -55,6 +55,11 @@ type Origin struct {
 	// CWD is the pane's working directory, which is how the session file is
 	// found again if it has to be.
 	CWD string `json:"cwd,omitempty"`
+	// Root is the git worktree the agent works in, which is the project a
+	// share is *about*. The repository a share opens its thread on comes from
+	// wherever `share` was run; this comes from the agent. They have to agree,
+	// or the thread records a conversation about code it does not contain.
+	Root string `json:"root,omitempty"`
 	// Session is the transcript file. Empty when the agent has none.
 	Session string `json:"session,omitempty"`
 	// Kind is the agent kind that wrote Session, and so the adapter that reads
