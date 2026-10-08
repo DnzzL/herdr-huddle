@@ -182,14 +182,22 @@ type sayClient struct {
 	said   []string
 	chats  []string
 	typing []bool
+	toRoom []bool
+	sizes  [][2]int
 }
 
 func (c *sayClient) Run(live.Events) error { return nil }
 func (c *sayClient) Say(t string) error    { c.said = append(c.said, t); return nil }
 func (c *sayClient) Chat(t string) error   { c.chats = append(c.chats, t); return nil }
-func (c *sayClient) Resize(_, _ int) error { return nil }
-func (c *sayClient) Typing(on bool) error  { c.typing = append(c.typing, on); return nil }
-func (c *sayClient) Close() error          { return nil }
+func (c *sayClient) Resize(cols, rows int) error {
+	c.sizes = append(c.sizes, [2]int{cols, rows})
+	return nil
+}
+func (c *sayClient) Typing(on, toRoom bool) error {
+	c.typing, c.toRoom = append(c.typing, on), append(c.toRoom, toRoom)
+	return nil
+}
+func (c *sayClient) Close() error { return nil }
 
 // The whole safety claim of the two-channel design: a line typed in room mode
 // must reach the room and never the agent, and the other way round. Getting
@@ -248,9 +256,10 @@ func TestCtrlTRoutesTheLineAndNeverBoth(t *testing.T) {
 	}
 }
 
-// Composing a message to a colleague is not composing an instruction, so it
-// must not tell the room the agent is about to be steered.
-func TestRoomModeMakesNoTypingClaim(t *testing.T) {
+// Somebody composing a message to the room is somebody about to speak, and the
+// room is owed that as much as it is owed an instruction coming. Without it a
+// host typing in their own pane is invisible to every joiner.
+func TestRoomMessagesClaimTypingToo(t *testing.T) {
 	app := testApp(t)
 	client := &sayClient{}
 	app.attach(client)
@@ -259,9 +268,97 @@ func TestRoomModeMakesNoTypingClaim(t *testing.T) {
 	for _, r := range "hang on" {
 		app.key(r)
 	}
-	for _, claimed := range client.typing {
-		if claimed {
-			t.Fatal("typing a message to the room claimed the agent was being steered")
+	claimed := false
+	for _, on := range client.typing {
+		claimed = claimed || on
+	}
+	if !claimed {
+		t.Fatal("typing a message to the room told nobody")
+	}
+	app.key('\r')
+	if last := client.typing[len(client.typing)-1]; last {
+		t.Error("sending the message left the typing claim standing")
+	}
+}
+
+// The footer is a window onto the room, and Ctrl-L is how a joiner makes it
+// bigger. The pane gives up the rows, and the server is asked for a stream at
+// the new size, which arrives as a complete repaint — the mechanism a resize
+// already uses.
+func TestCtrlLGrowsTheFooterAndShrinksThePane(t *testing.T) {
+	app := testApp(t)
+	app.view.Rows = 30
+	app.view.Extra = defaultExtra
+	client := &sayClient{}
+	app.attach(client)
+
+	small := app.view.PaneRows()
+	app.key(12) // Ctrl-L
+	big := app.view.PaneRows()
+	if big >= small {
+		t.Fatalf("expanding left the pane at %d rows (was %d)", big, small)
+	}
+	if got := client.sizes[len(client.sizes)-1]; got[1] != big {
+		t.Errorf("server asked for %d rows, want the pane's %d", got[1], big)
+	}
+	app.key(12)
+	if got := app.view.PaneRows(); got != small {
+		t.Errorf("collapsing left the pane at %d rows, want %d", got, small)
+	}
+	if got := client.sizes[len(client.sizes)-1]; got[1] != small {
+		t.Errorf("server asked for %d rows after collapsing, want %d", got[1], small)
+	}
+}
+
+// Everything that happens to a joiner is kept, not only the last of it.
+func TestAJoinerKeepsWhatHappened(t *testing.T) {
+	app := testApp(t)
+	app.setRoom(live.Frame{You: "ana", Members: []string{"ana"}})
+	app.heard(live.Frame{Author: "bo", Text: "first"})
+	app.heard(live.Frame{Author: "bo", Text: "second"})
+	app.said(live.Frame{Author: "bo", Text: "fix it", Status: live.StatusSent})
+
+	got := logText(app)
+	for _, want := range []string{"first", "second", "fix it"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("history lost %q:\n%s", want, got)
 		}
+	}
+}
+
+// The claim says who the sentence is for, and changing your mind mid-sentence
+// is a new claim, not a renewal of the old one.
+func TestTypingClaimNamesItsDestination(t *testing.T) {
+	app := testApp(t)
+	client := &sayClient{}
+	app.attach(client)
+
+	app.key('h') // agent mode
+	app.key(20)  // Ctrl-T: same sentence, now for the room
+	app.key('i')
+
+	if len(client.toRoom) != 2 || client.toRoom[0] || !client.toRoom[1] {
+		t.Errorf("claims = %v, want one for the agent then one for the room", client.toRoom)
+	}
+}
+
+// "?" opens the help only on an empty line: a question mark in a sentence is a
+// question mark.
+func TestQuestionMarkIsHelpOnlyOnAnEmptyLine(t *testing.T) {
+	app := testApp(t)
+	app.key('?')
+	if !app.view.Help {
+		t.Fatal("? on an empty line did not open the help")
+	}
+	app.key('?')
+	if app.view.Help {
+		t.Fatal("? did not close the help")
+	}
+	for _, r := range "why" {
+		app.key(r)
+	}
+	app.key('?')
+	if app.view.Help || app.view.Input != "why?" {
+		t.Errorf("a ? mid-sentence: help=%v input=%q, want it typed", app.view.Help, app.view.Input)
 	}
 }

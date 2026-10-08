@@ -210,14 +210,19 @@ func (s *Session) Chat(text string) error {
 	return nil
 }
 
-// Typing says this joiner has started or stopped composing an instruction.
+// Typing says this joiner has started or stopped composing — an instruction
+// for the agent, or, with toRoom, a message for the room.
 //
 // It is a claim about oneself: the server attributes it to the login the gate
 // proved and ignores anything the record might name. The claim lapses on its
 // own (TypingTTL), so a client that dies mid-sentence stops appearing to type
 // without having to say so.
-func (s *Session) Typing(on bool) error {
-	return s.write(Frame{Type: TypeTyping, On: on})
+func (s *Session) Typing(on, toRoom bool) error {
+	f := Frame{Type: TypeTyping, On: on}
+	if toRoom {
+		f.To = ToRoom
+	}
+	return s.write(f)
 }
 
 func (s *Session) write(f Frame) error {

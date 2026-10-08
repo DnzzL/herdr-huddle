@@ -190,6 +190,28 @@ this log — you are watching your agent, not the terminal `serve` prints into.
 Questions are asked one at a time in the order they arrived, and one about
 somebody who has since disconnected is dropped rather than left on your screen.
 
+### The host's room
+
+In a terminal, `serve` draws your side of the huddle instead of scrolling a log:
+the line to send at the top, then what happened — who came and left, the room's
+chat, every instruction and what became of it — with the same roster, agent
+state and typing marks a joiner has underneath, and a line that talks to the
+room. The door's and the moderator's questions are answered there with a single
+`y` or `n`, on an empty line.
+
+```
+15:22 @ana joined
+15:23 @ana: wait, not the migration
+15:24 @ana → fix the gate · delivered
+? @carl is at the door (github.com/carl). let them into the huddle?  [y/n]
+── huddle ──────────────────────────────────────── acme/demo#13 ──
+● working   you (host), @ana (typing…) and @bo
+room ›
+```
+
+You steer the agent from its own pane, as before: this line never reaches it.
+`--plain` keeps the old log, for a `serve` nobody is sitting in front of.
+
 ### Letting somebody in is not letting them drive
 
 `--moderated` splits those into two decisions. Every instruction is put to you,
@@ -213,15 +235,22 @@ answer. Use it for anyone you would not hand your shell to.
   from the top, so someone arriving late sees a whole screen rather than the tail
   of one. Resizing repaints it. Several people can be in at once, each at their
   own size.
-- **The room**: who else is here — the operator included, marked as the host,
-  because they are at the pane without being connected — and what the agent is
+- **The room**: who else is here — the operator included, marked as the host —
+  and what the agent is
   doing: `working`, `idle`, or `waiting on the operator`. That last one is the
   thing a silent pane cannot tell you. Everyone has a colour, and it is the same
   colour everywhere, so the room is scanned rather than read.
-- **Who is composing right now**, marked on the person: `@ana (typing…)`. It is
-  the signal that stops two people asking the agent for the same thing at once,
-  and it lapses on its own, so a client that dies mid-sentence does not type
-  forever.
+- **Who is composing right now**, marked on the person and saying who it is
+  for: `@ana (typing to agent…)` or `@ana (typing to room…)`. The first stops two
+  people asking the agent for the same thing at once; the second is somebody
+  about to speak. It lapses on its own, so a client that dies mid-sentence does
+  not type forever. The host is marked too, when they write in their room.
+- **A footer you can follow.** The last few things that happened — who came,
+  what was said, what became of each instruction — stay on screen above the
+  input line, with the shortcuts on the rule. `Ctrl-L` makes it taller (the pane
+  gives up the rows and repaints at the new size), and again to put it back.
+  `?` on an empty line lists every key: `↑↓` recalls what you sent, `Ctrl-U`
+  clears the line, `Ctrl-W` deletes a word.
 - **Two places to type.** `Ctrl-T` switches the input line between the agent and
   the room, and the line says which — `agent ›` or `room ›`. Talking to the room
   reaches the people and never the agent, so you can say "wait, don't touch the
@@ -280,7 +309,7 @@ herdr-huddle auth status
 herdr-huddle auth logout
 herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
 herdr-huddle poll [--once] [--interval 10s]
-herdr-huddle serve [--pane id] [--open | --closed] [--moderated] [--notify] [--no-tunnel] [--addr host:port]
+herdr-huddle serve [--pane id] [--open | --closed] [--moderated] [--notify] [--plain] [--no-tunnel] [--addr host:port]
 herdr-huddle join [address] [--addr 127.0.0.1:8787]
 ```
 

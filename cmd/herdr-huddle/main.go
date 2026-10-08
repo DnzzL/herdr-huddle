@@ -51,6 +51,13 @@ const (
 // tell it apart from an operational failure.
 var errUsage = errors.New("usage")
 
+// The two clients the room can drive — a joiner over a socket, the host in
+// process — must keep satisfying what the TUI asks of them.
+var (
+	_ tui.Client = (*live.Session)(nil)
+	_ tui.Client = (*live.Local)(nil)
+)
+
 func main() {
 	err := run(os.Args[1:])
 	if err == nil {
@@ -110,7 +117,7 @@ Usage:
   herdr-huddle auth logout
   herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
   herdr-huddle poll [--once] [--interval 10s]
-  herdr-huddle serve [--pane id] [--open|--closed] [--moderated] [--no-tunnel] [--addr host:port]
+  herdr-huddle serve [--pane id] [--open|--closed] [--moderated] [--plain] [--no-tunnel] [--addr host:port]
   herdr-huddle join [address] [--addr 127.0.0.1:8787]
 
 Auth:
@@ -164,6 +171,10 @@ Serve and join:
            --notify      announce the join line as a Herdr notification. For
                          the plugin action, whose output only reaches
                          herdr plugin log.
+           --plain       print log lines instead of drawing your room. In a
+                         terminal serve draws it by default: who is here, who
+                         is typing, the chat, and the questions you answer
+                         with y or n.
            By default the door knocks: somebody who is not on the allowlist
            yet proves who they are on GitHub, you are asked here, and one
            keypress lets them in for good — their pull-request comments
@@ -542,6 +553,7 @@ func runServe(args []string) error {
 	closed := fs.Bool("closed", false, "the allowlist or nothing: never ask, never knock")
 	moderated := fs.Bool("moderated", false, "approve every instruction before it reaches the agent")
 	notify := fs.Bool("notify", false, "announce the join line as a Herdr notification (for a plugin action, whose output nobody sees)")
+	plain := fs.Bool("plain", false, "print log lines instead of drawing the host's room (the default when there is a terminal)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -573,14 +585,50 @@ func runServe(args []string) error {
 		return fmt.Errorf("could not listen on %s: %w", *addr, err)
 	}
 
+	// The operator's own seat in the room, drawn when there is a terminal to
+	// draw on. It takes the keyboard and the screen, so everything `serve`
+	// says — and every question it asks — goes through it from here on.
+	var host *tui.App
+	if !*plain && tui.IsTerminal(os.Stdin) && tui.IsTerminal(os.Stdout) {
+		host = &tui.App{
+			In: os.Stdin, Out: os.Stdout, Host: true,
+			Hint: "enter talks to the room · y/n answers a question · ctrl-c ends the huddle",
+		}
+	}
 	logf := func(format string, args ...any) {
+		if host != nil {
+			host.Note(fmt.Sprintf(format, args...))
+			return
+		}
 		fmt.Fprintf(os.Stderr, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05")}, args...)...)
+	}
+	// note is what `serve` says about itself, as opposed to about a joiner.
+	note := func(format string, args ...any) {
+		if host != nil {
+			for _, row := range strings.Split(fmt.Sprintf(format, args...), "\n") {
+				host.Note(row)
+			}
+			return
+		}
+		fmt.Fprintf(os.Stderr, "herdr-huddle: "+format+"\n", args...)
+	}
+	joinLine := func(what, endpoint string) {
+		if host != nil {
+			host.Note(what)
+			host.Pin("send them:  herdr-huddle join " + endpoint)
+			return
+		}
+		printJoinLine(what, endpoint)
 	}
 
 	at := &console{in: bufio.NewReader(os.Stdin), out: os.Stderr, notify: notifier(ctx, logf)}
-	// Reading starts now, so that anything typed before a question was asked
-	// is recognisably older than it.
-	at.listen()
+	if host != nil {
+		at.panel = host
+	} else {
+		// Reading starts now, so that anything typed before a question was
+		// asked is recognisably older than it.
+		at.listen()
+	}
 
 	server := &live.Server{
 		Pane:           state.Origin.PaneID,
@@ -589,7 +637,7 @@ func runServe(args []string) error {
 		Observe:        &live.HerdrObserver{},
 		Gate:           doorFor(shareStore(), state, *open, *closed, at, logf),
 		Instructor:     live.HerdrInstructor{},
-		Ledger:         threadLedger(ctx, state),
+		Ledger:         threadLedger(ctx, state, note),
 		Spool:          spoolFor(state),
 		ThreadURL:      state.URL,
 		Host:           operatorLogin(ctx),
@@ -598,11 +646,10 @@ func runServe(args []string) error {
 		StatusInterval: live.DefaultStatusInterval,
 		Log:            logf,
 	}
-	fmt.Fprintf(os.Stderr, "herdr-huddle: streaming %s for %s — the record is %s\n",
-		state.Origin.PaneID, state.Repo, state.URL)
-	fmt.Fprintf(os.Stderr, "herdr-huddle: the door is %s\n", doorLabel(*open, *closed))
+	note("streaming %s for %s — the record is %s", state.Origin.PaneID, state.Repo, state.URL)
+	note("the door is %s", doorLabel(*open, *closed))
 	if *moderated {
-		fmt.Fprintf(os.Stderr, "herdr-huddle: moderated — every instruction is put to you before the agent sees it\n")
+		note("moderated — every instruction is put to you before the agent sees it")
 	}
 
 	announce := func(endpoint string) {
@@ -613,28 +660,43 @@ func runServe(args []string) error {
 
 	switch {
 	case *noTunnel:
-		printJoinLine("join from this machine:", ln.Addr().String())
+		joinLine("join from this machine:", ln.Addr().String())
 		announce(ln.Addr().String())
 	default:
-		fmt.Fprintf(os.Stderr, "herdr-huddle: starting a tunnel…\n")
+		note("starting a tunnel…")
 		tunnel, err := live.StartTunnel(ctx, "", "http://"+ln.Addr().String())
 		switch {
 		case err == nil:
 			defer func() { _ = tunnel.Close() }()
-			printJoinLine("live share ready — send them:", tunnel.URL)
+			joinLine("live share ready — send them:", tunnel.URL)
 			announce(tunnel.URL)
 		case errors.Is(err, live.ErrTunnelBinaryMissing):
-			fmt.Fprintf(os.Stderr, "herdr-huddle: cloudflared is not installed, so this share is local only.\n"+
-				"  install it (nix profile install nixpkgs#cloudflared, or environment.systemPackages = [ pkgs.cloudflared ]) and re-run for a link to send.\n")
-			printJoinLine("join from this machine:", ln.Addr().String())
+			note("cloudflared is not installed, so this share is local only.\n" +
+				"  install it (nix profile install nixpkgs#cloudflared, or environment.systemPackages = [ pkgs.cloudflared ]) and re-run for a link to send.")
+			joinLine("join from this machine:", ln.Addr().String())
 			announce(ln.Addr().String())
 		default:
-			fmt.Fprintf(os.Stderr, "herdr-huddle: no tunnel: %v\n", err)
-			printJoinLine("join from this machine:", ln.Addr().String())
+			note("no tunnel: %v", err)
+			joinLine("join from this machine:", ln.Addr().String())
 			announce(ln.Addr().String())
 		}
 	}
-	return server.Serve(ctx, ln)
+	if host == nil {
+		return server.Serve(ctx, ln)
+	}
+
+	// The host's room is the foreground; the server runs behind it. Ctrl-C in
+	// the room ends the huddle, and the server ending ends the room.
+	ctx, end := context.WithCancel(ctx)
+	defer end()
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(ctx, ln); end() }()
+	runErr := host.Run(ctx, func(context.Context) (tui.Client, error) { return server.Attach(), nil })
+	end()
+	if err := <-served; err != nil {
+		return err
+	}
+	return runErr
 }
 
 // threadLedger is the record half of steering: delivered instructions are
@@ -644,12 +706,12 @@ func runServe(args []string) error {
 // (ADR-005), so instructions arrive live and their records queue until the
 // ledger works again. The warning is printed once, at startup, because the
 // first failed post would otherwise be the first sign.
-func threadLedger(ctx context.Context, state share.State) *thread.InstructionLedger {
+func threadLedger(ctx context.Context, state share.State, warn func(string, ...any)) *thread.InstructionLedger {
 	owner, name := state.Owner()
 	store := auth.TokenStore{}
 	token, _, err := store.Load(ctx)
 	if err != nil || strings.TrimSpace(token) == "" {
-		fmt.Fprintf(os.Stderr, "herdr-huddle: no usable operator token: instructions will still reach the agent, but their records will queue until you run `herdr-huddle auth login`\n")
+		warn("no usable operator token: instructions will still reach the agent, but their records will queue until you run `herdr-huddle auth login`")
 	}
 	return &thread.InstructionLedger{
 		Client: &github.Client{Token: token},
@@ -727,6 +789,12 @@ type console struct {
 	// notify raises the question on the screen the operator is actually
 	// looking at, which is their agent and not this log.
 	notify func(title, body string)
+	// panel, when set, asks on the host's screen instead of reading this
+	// terminal: the room owns the keyboard, and two readers on one stdin eat
+	// each other's keys.
+	panel interface {
+		Ask(ctx context.Context, question string) (bool, error)
+	}
 
 	start   sync.Once
 	turn    chan struct{}
@@ -788,6 +856,12 @@ func (c *console) ApproveInstruction(ctx context.Context, login, text string) (b
 
 // put waits its turn, asks, and reads one answer. Anything but yes is no.
 func (c *console) put(ctx context.Context, title, body, question string) (bool, error) {
+	if c.panel != nil {
+		if c.notify != nil {
+			c.notify(title, body)
+		}
+		return c.panel.Ask(ctx, question)
+	}
 	c.listen()
 
 	behind := c.waiting.Add(1) - 1
@@ -1073,7 +1147,7 @@ func runJoin(args []string) error {
 	app := &tui.App{
 		In:   os.Stdin,
 		Out:  os.Stdout,
-		Hint: "enter sends · ctrl-t switches between the agent and the room · ctrl-c leaves",
+		Hint: "enter sends · ctrl-t switches between the agent and the room · ctrl-l shows more · ctrl-c leaves",
 	}
 	// A dialer rather than a connection: a dropped tunnel is a reconnect, not
 	// the end of the huddle, and every redial reads the window size afresh
@@ -1083,7 +1157,7 @@ func runJoin(args []string) error {
 		// The viewport is asked for before the first frame, because the server
 		// starts this joiner's observer at whatever size the hello carried
 		// (ADR-007). Getting it afterwards would cost a restart on arrival.
-		session, err := live.Dial(ctx, endpoint, token, live.WithViewport(cols, tui.PaneRows(rows)))
+		session, err := live.Dial(ctx, endpoint, token, live.WithViewport(cols, app.PaneRowsAt(rows)))
 		if err != nil {
 			return nil, err
 		}

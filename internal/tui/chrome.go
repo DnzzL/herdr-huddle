@@ -60,6 +60,8 @@ type Room struct {
 	// Typing is who is composing an instruction right now, never including
 	// You.
 	Typing []string
+	// Chatting is the part of Typing writing to the room, not the agent.
+	Chatting []string
 	// Agent is herdr's own status vocabulary, or empty when unknown.
 	Agent string
 	// Thread is the pull request URL the share is bound to.
@@ -77,6 +79,56 @@ type View struct {
 	Mode mode
 	// Cols and Rows are the terminal's, not the pane's.
 	Cols, Rows int
+	// Pinned and Log fill the host's panel, which stands where a joiner's pane
+	// is: the line to send somebody, then what happened, oldest first.
+	Pinned line
+	Log    []line
+	// Keys are the shortcuts shown on the rule, most useful first. The host
+	// has none: its hints are on its event row.
+	Keys []string
+	// Help swaps the history rows for a list of every key the line knows.
+	Help bool
+	// Extra is how many rows of what led up to the last event are drawn above
+	// the chrome's own four. Zero is the bare chrome.
+	Extra int
+}
+
+// PaneRows is how many rows the pane gets under this view's footer.
+func (v View) PaneRows() int {
+	return max(v.Rows-ChromeRows-v.Extra, MinPaneRows)
+}
+
+// helpLines is every key the input line understands, in two rows so it fits
+// the footer as it is by default.
+var helpLines = []string{
+	"enter send · ↑↓ recall what you sent · ctrl-t agent/room · ctrl-l taller footer",
+	"ctrl-u clear line · ctrl-w delete word · ctrl-c leave · ? close this (empty line)",
+}
+
+// history is the Extra rows before the last event: the newest closest to it,
+// the oldest at the top, blank where nothing has happened yet. The last log
+// entry is not repeated, because the event row is already it.
+func (v View) history() []line {
+	rows := make([]line, v.Extra)
+	if v.Help {
+		// The newest rows, the ones nearest the input, so the keys sit where
+		// the person is looking; a taller footer just has blank rows above.
+		for i, text := range helpLines {
+			if at := v.Extra - len(helpLines) + i; at >= 0 {
+				rows[at] = line{}.add(grey, text)
+			}
+		}
+		return rows
+	}
+	past := v.Log
+	if len(past) > 0 {
+		past = past[:len(past)-1]
+	}
+	if len(past) > v.Extra {
+		past = past[len(past)-v.Extra:]
+	}
+	copy(rows[v.Extra-len(past):], past)
+	return rows
 }
 
 // ANSI pieces. Written out rather than pulled from a library: four lines of
@@ -166,14 +218,15 @@ func (v View) Chrome() string {
 	if cols < 20 {
 		cols = 20
 	}
-	first := v.Rows - ChromeRows + 1
+	first := v.Rows - ChromeRows - v.Extra + 1
 	if first < 1 {
 		first = 1
 	}
 
 	var b strings.Builder
 	b.WriteString(saveCursor)
-	rows := []line{v.rule(cols), v.status(), v.event(), v.prompt(cols)}
+	rows := append([]line{v.rule(cols), v.status()}, v.history()...)
+	rows = append(rows, v.event(), v.prompt(cols))
 	for i, row := range rows {
 		fmt.Fprintf(&b, "\x1b[%d;1H%s%s", first+i, clrLine, row.render(cols))
 	}
@@ -181,6 +234,33 @@ func (v View) Chrome() string {
 	// The cursor is parked where the typing goes, after the restore, because a
 	// visible cursor anywhere else reads as the terminal having lost it.
 	fmt.Fprintf(&b, "\x1b[%d;%dH", v.Rows, promptWidth(v.Input, v.Mode, cols))
+	return b.String()
+}
+
+// Panel paints the rows above the chrome with the host's view of the huddle —
+// the pinned line first, then as much of the log as fits, newest at the
+// bottom. It is the host's counterpart of the pane a joiner is looking at.
+func (v View) Panel() string {
+	cols := max(v.Cols, 20)
+	n := v.PaneRows()
+	rows := make([]line, 0, n)
+	if len(v.Pinned) > 0 {
+		rows = append(rows, v.Pinned)
+	}
+	logs := v.Log
+	if room := n - len(rows); len(logs) > room {
+		logs = logs[len(logs)-room:]
+	}
+	rows = append(rows, logs...)
+
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		var row line
+		if i < len(rows) {
+			row = rows[i]
+		}
+		fmt.Fprintf(&b, "\x1b[%d;1H%s%s", i+1, clrLine, row.render(cols))
+	}
 	return b.String()
 }
 
@@ -192,14 +272,25 @@ func (v View) rule(cols int) line {
 	if short := shortThread(v.Room.Thread); short != "" {
 		right = " " + short + " ──"
 	}
-	fill := cols - width(left) - width(right)
+	// Shortcuts, as many as fit, most useful first, and always leaving the
+	// rule a stretch of line so it still reads as a rule.
+	const minFill = 3
+	var keys string
+	for _, k := range v.Keys {
+		next := keys + "· " + k + " "
+		if width(left)+width(next)+width(right)+minFill > cols {
+			break
+		}
+		keys = next
+	}
+	fill := cols - width(left) - width(keys) - width(right)
 	if fill < 0 {
-		right, fill = "", cols-width(left)
+		keys, right, fill = "", "", cols-width(left)
 	}
 	if fill < 0 {
 		fill = 0
 	}
-	return line{}.add(dim, left+strings.Repeat("─", fill)+right)
+	return line{}.add(dim, left).add(grey, keys).add(dim, strings.Repeat("─", fill)+right)
 }
 
 // status is the room's state in one line: what the agent is doing, then who is
@@ -225,6 +316,11 @@ func (v View) roster() line {
 		typing[strings.ToLower(who)] = true
 	}
 
+	chatting := map[string]bool{}
+	for _, who := range v.Room.Chatting {
+		chatting[strings.ToLower(who)] = true
+	}
+
 	mark := func(login, note string) {
 		key := strings.ToLower(login)
 		if key == "" || seen[key] {
@@ -237,10 +333,16 @@ func (v View) roster() line {
 		// on the event line: somebody else composing must never hide the
 		// confirmation that your own instruction was delivered.
 		if typing[key] {
+			// Who it is for matters as much as that it is happening: a
+			// message to the room is not about to change what the agent does.
+			doing := "typing to agent…"
+			if chatting[key] {
+				doing = "typing to room…"
+			}
 			if note != "" {
-				note += ", typing…"
+				note += ", " + doing
 			} else {
-				note = "typing…"
+				note = doing
 			}
 		}
 		if note != "" {

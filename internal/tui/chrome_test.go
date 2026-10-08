@@ -226,7 +226,7 @@ func TestTypingIsShownOnThePerson(t *testing.T) {
 	}
 
 	view.Room.Typing = []string{"bo"}
-	if got := view.roster().plain(); got != "@thomas (host), you and @bo (typing…)" {
+	if got := view.roster().plain(); got != "@thomas (host), you and @bo (typing to agent…)" {
 		t.Errorf("roster = %q, want @bo marked as typing", got)
 	}
 	// And the event line is untouched: what was delivered stays readable.
@@ -234,9 +234,16 @@ func TestTypingIsShownOnThePerson(t *testing.T) {
 		t.Errorf("event = %q, want somebody typing not to hide it", got)
 	}
 
+	// A message to the room is told apart from an instruction.
+	view.Room.Chatting = []string{"bo"}
+	if got := view.roster().plain(); got != "@thomas (host), you and @bo (typing to room…)" {
+		t.Errorf("roster = %q, want @bo marked as writing to the room", got)
+	}
+	view.Room.Chatting = nil
+
 	// The operator typing keeps being the operator.
 	view.Room.Typing = []string{"thomas"}
-	if got := view.roster().plain(); got != "@thomas (host, typing…), you and @bo" {
+	if got := view.roster().plain(); got != "@thomas (host, typing to agent…), you and @bo" {
 		t.Errorf("roster = %q, want the host marked as both", got)
 	}
 }
@@ -329,5 +336,107 @@ func TestThePromptFitsInEitherMode(t *testing.T) {
 		if got := len([]rune(view.prompt(view.Cols).plain())); got > view.Cols {
 			t.Errorf("mode %v: prompt is %d columns wide, want at most %d", m, got, view.Cols)
 		}
+	}
+}
+
+func logOf(texts ...string) []line {
+	var out []line
+	for _, text := range texts {
+		out = append(out, line{}.add("", text))
+	}
+	return out
+}
+
+// The footer shows what led up to the last thing that happened, so a
+// conversation can be followed rather than glimpsed.
+func TestFooterKeepsTheRecentPast(t *testing.T) {
+	view := View{
+		Cols: 60, Rows: 24, Extra: 2,
+		Room:  Room{You: "ana", Members: []string{"ana", "bo"}, Agent: herdr.StatusWorking},
+		Log:   logOf("one", "two", "three", "four", "five"),
+		Event: line{}.add("", "five"),
+	}
+	drawn := rows(t, view.Chrome())
+	if len(drawn) != ChromeRows+2 {
+		t.Fatalf("drew %d rows, want %d", len(drawn), ChromeRows+2)
+	}
+	all := ""
+	for _, text := range drawn {
+		all += text + "\n"
+	}
+	for _, want := range []string{"three", "four", "five"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("footer is missing %q:\n%s", want, all)
+		}
+	}
+	if strings.Contains(all, "two") {
+		t.Errorf("footer shows more than it has rows for:\n%s", all)
+	}
+	if got, want := view.PaneRows(), 24-ChromeRows-2; got != want {
+		t.Errorf("PaneRows = %d, want %d", got, want)
+	}
+}
+
+// With nothing to show yet the extra rows are blank, not garbage, and the
+// history never repeats the line the event row already carries.
+func TestFooterWithLittleHistory(t *testing.T) {
+	view := View{Cols: 60, Rows: 24, Extra: 3, Log: logOf("only"), Event: line{}.add("", "only")}
+	drawn := rows(t, view.Chrome())
+	count := 0
+	for _, text := range drawn {
+		if strings.Contains(text, "only") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("the one event is drawn %d times, want once", count)
+	}
+}
+
+// The shortcuts a joiner needs are on the rule, where they cost no pane rows,
+// most useful first so a narrow window drops the least useful.
+func TestRuleCarriesTheShortcutsThatFit(t *testing.T) {
+	keys := []string{"ctrl-t agent/room", "ctrl-l more", "ctrl-c leave"}
+	view := View{Cols: 100, Rows: 24, Keys: keys, Room: Room{Thread: "https://github.com/acme/demo/pull/13"}}
+	wide := view.rule(100).plain()
+	for _, k := range keys {
+		if !strings.Contains(wide, k) {
+			t.Errorf("wide rule is missing %q: %q", k, wide)
+		}
+	}
+	if !strings.Contains(wide, "acme/demo#13") {
+		t.Errorf("the shortcuts pushed the record off the rule: %q", wide)
+	}
+
+	for _, cols := range []int{60, 44, 30, 20} {
+		got := view.rule(cols).plain()
+		if n := len([]rune(got)); n > cols {
+			t.Errorf("%d columns: rule is %d wide: %q", cols, n, got)
+		}
+	}
+	if got := view.rule(56).plain(); !strings.Contains(got, "ctrl-t agent/room") || strings.Contains(got, "ctrl-c leave") {
+		t.Errorf("a narrow rule should keep the first shortcuts and drop the last: %q", got)
+	}
+	// The host reads hints on its own event row and has none here.
+	if got := (View{Cols: 100, Rows: 24}).rule(100).plain(); strings.Contains(got, "ctrl") {
+		t.Errorf("a rule with no Keys shows shortcuts: %q", got)
+	}
+}
+
+// Every key the line understands is findable without reading the source.
+func TestHelpListsEveryKey(t *testing.T) {
+	view := View{Cols: 80, Rows: 24, Extra: defaultExtra, Help: true, Log: logOf("one", "two", "three")}
+	drawn := rows(t, view.Chrome())
+	all := ""
+	for _, text := range drawn {
+		all += text + "\n"
+	}
+	for _, key := range []string{"enter", "↑↓", "ctrl-t", "ctrl-u", "ctrl-w", "ctrl-l", "ctrl-c", "?"} {
+		if !strings.Contains(all, key) {
+			t.Errorf("help does not mention %q:\n%s", key, all)
+		}
+	}
+	if len(drawn) != ChromeRows+defaultExtra {
+		t.Errorf("help drew %d rows, want it to fit the footer (%d)", len(drawn), ChromeRows+defaultExtra)
 	}
 }

@@ -25,7 +25,7 @@ type Client interface {
 	Say(text string) error
 	Chat(text string) error
 	Resize(cols, rows int) error
-	Typing(on bool) error
+	Typing(on, toRoom bool) error
 	Close() error
 }
 
@@ -76,6 +76,10 @@ type App struct {
 	// Hint is the first thing on the event line, before anything has
 	// happened.
 	Hint string
+	// Host draws the operator's view of the huddle: a panel of what happened
+	// where a joiner's pane would be, and a line that only ever talks to the
+	// room. The operator steers the agent from the agent's own pane.
+	Host bool
 
 	mu         sync.Mutex
 	view       View
@@ -95,7 +99,26 @@ type App struct {
 	// something it already knows, several times a second.
 	typingOn bool
 	typingAt time.Time
+	typingTo mode
+
+	// running is whether the terminal has been taken over. Notes written
+	// before then wait in the log rather than land on the shell.
+	running bool
+
+	// pending is the question the host is being asked, if any. askTurn
+	// serialises questions: one on screen at a time, in arrival order.
+	pending *asking
+	askOnce sync.Once
+	askTurn chan struct{}
 }
+
+// defaultExtra is how many earlier lines a joiner's footer shows above the
+// last one; Ctrl-L swaps it for a taller window onto the room.
+const defaultExtra = 2
+
+// maxLog is how many lines of the huddle the host can scroll back through —
+// which is none, so it is only a bound on memory.
+const maxLog = 200
 
 // typingRenew is how often a standing typing claim is renewed. Comfortably
 // inside live.TypingTTL, so a person typing slowly never flickers out of the
@@ -158,12 +181,24 @@ func (a *App) Run(ctx context.Context, dial Dialer) error {
 	a.mu.Lock()
 	a.view.Cols, a.view.Rows = cols, rows
 	a.view.Event = line{}.add(dim, a.Hint)
-	a.paneRows = PaneRows(rows)
+	if a.Host {
+		a.view.Mode = toRoom
+	} else {
+		a.view.Extra = defaultExtra
+		a.view.Keys = []string{"ctrl-t agent/room", "? help", "ctrl-l more", "ctrl-c leave", "↑↓ recall"}
+	}
+	a.paneRows = a.view.PaneRows()
 	a.histAt = 0
+	a.running = true
 	a.mu.Unlock()
 
 	a.writeRaw(enterAlt + clearScreen + a.scrollRegion())
-	defer a.writeRaw("\x1b[r" + leaveAlt + showCursor + reset)
+	defer func() {
+		a.mu.Lock()
+		a.running = false
+		a.mu.Unlock()
+		a.writeRaw("\x1b[r" + leaveAlt + showCursor + reset)
+	}()
 	a.repaint()
 
 	// The keyboard and the window belong to the terminal, not to any one
@@ -347,6 +382,9 @@ func (a *App) talk() Client {
 
 // key applies one keystroke and reports whether it was the one that leaves.
 func (a *App) key(r rune) bool {
+	if a.answered(r) {
+		return false
+	}
 	switch r {
 	case 3, 4: // Ctrl-C, Ctrl-D. Raw mode means no signal arrives for these.
 		return true
@@ -369,6 +407,12 @@ func (a *App) key(r rune) bool {
 		a.recall(+1)
 	case 20: // Ctrl-T
 		a.toggleMode()
+	case 12: // Ctrl-L
+		a.toggleHistory()
+	case '?':
+		if !a.toggleHelp() {
+			a.edit(func(in []rune) []rune { return append(in, r) })
+		}
 	default:
 		if r < 0x20 || r >= keyFirst {
 			return false // an unhandled control or navigation key types nothing
@@ -462,6 +506,9 @@ func (a *App) submit() {
 // silent: telling the agent to do something when you meant to say "hang on" to
 // a colleague.
 func (a *App) toggleMode() {
+	if a.Host {
+		return // the host's line has one destination
+	}
 	a.mu.Lock()
 	if a.view.Mode == toAgent {
 		a.view.Mode = toRoom
@@ -489,14 +536,16 @@ func (a *App) heard(f live.Frame) {
 }
 
 // claimTyping tells the room this person is composing, renewing a standing
-// claim rather than repeating it. Composing a message to the room is not
-// composing an instruction, so it makes no claim at all.
+// claim rather than repeating it. A message to the room counts as much as an
+// instruction: both are somebody about to speak.
 func (a *App) claimTyping() {
 	a.mu.Lock()
-	empty := strings.TrimSpace(a.view.Input) == "" || a.view.Mode == toRoom
-	fresh := a.typingOn && time.Since(a.typingAt) < typingRenew
+	empty := strings.TrimSpace(a.view.Input) == ""
+	// A claim for the other destination is a different claim, however fresh.
+	fresh := a.typingOn && a.typingTo == a.view.Mode && time.Since(a.typingAt) < typingRenew
+	toRoom := a.view.Mode == toRoom
 	if !empty {
-		a.typingOn, a.typingAt = true, time.Now()
+		a.typingOn, a.typingAt, a.typingTo = true, time.Now(), a.view.Mode
 	}
 	a.mu.Unlock()
 
@@ -508,7 +557,7 @@ func (a *App) claimTyping() {
 		return
 	}
 	if client := a.talk(); client != nil {
-		_ = client.Typing(true)
+		_ = client.Typing(true, toRoom)
 	}
 }
 
@@ -522,7 +571,7 @@ func (a *App) stopTyping() {
 		return
 	}
 	if client := a.talk(); client != nil {
-		_ = client.Typing(false)
+		_ = client.Typing(false, false)
 	}
 }
 
@@ -568,15 +617,19 @@ func (a *App) drawFrame(data []byte) error {
 func (a *App) setRoom(f live.Frame) {
 	a.mu.Lock()
 	a.view.Room = Room{
-		You:     f.You,
-		Host:    f.Host,
-		Members: f.Members,
-		Typing:  f.Typing,
-		Agent:   f.Agent,
-		Thread:  f.Thread,
+		You:      f.You,
+		Host:     f.Host,
+		Members:  f.Members,
+		Typing:   f.Typing,
+		Chatting: f.Chatting,
+		Agent:    f.Agent,
+		Thread:   f.Thread,
 	}
 	if event := a.membershipEventLocked(f); len(event) > 0 {
-		a.view.Event = event
+		a.logLocked(event)
+		if !a.Host {
+			a.view.Event = event
+		}
 	}
 	a.mu.Unlock()
 	a.repaint()
@@ -660,7 +713,12 @@ func outcomeColour(status string) string {
 
 func (a *App) setEvent(row line) {
 	a.mu.Lock()
-	a.view.Event = row
+	// The host's last line is its hint or a question; everyone's history is
+	// the log.
+	a.logLocked(row)
+	if !a.Host {
+		a.view.Event = row
+	}
 	a.mu.Unlock()
 	a.repaint()
 }
@@ -675,8 +733,17 @@ func (a *App) resized() {
 		return
 	}
 	a.view.Cols, a.view.Rows = cols, rows
-	a.paneRows = PaneRows(rows)
-	pane := a.paneRows
+	a.mu.Unlock()
+	a.relayout()
+}
+
+// relayout redraws the room for a new terminal size or footer height, and asks
+// the server for a stream at the pane's new size, which arrives as a complete
+// repaint.
+func (a *App) relayout() {
+	a.mu.Lock()
+	a.paneRows = a.view.PaneRows()
+	cols, pane := a.view.Cols, a.paneRows
 	a.mu.Unlock()
 
 	a.writeRaw(clearScreen + a.scrollRegion())
@@ -688,6 +755,46 @@ func (a *App) resized() {
 	if err := client.Resize(cols, pane); err != nil {
 		a.setEvent(line{}.add(red, "could not ask for a repaint at the new size: "+err.Error()))
 	}
+}
+
+// PaneRowsAt is how many rows the pane gets in a terminal of this height, under
+// the footer as it stands now. A dial asks the server for it: it is read from
+// the window afresh on every redial, and the footer may have been expanded
+// since the last one.
+func (a *App) PaneRowsAt(rows int) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return View{Rows: rows, Extra: a.view.Extra}.PaneRows()
+}
+
+// toggleHistory trades pane rows for room history, and back. The host has no
+// pane to trade: their history is the panel.
+func (a *App) toggleHistory() {
+	if a.Host {
+		return
+	}
+	a.mu.Lock()
+	if a.view.Extra == defaultExtra {
+		a.view.Extra = min(max(a.view.Rows/3, 4), 12)
+	} else {
+		a.view.Extra = defaultExtra
+	}
+	a.mu.Unlock()
+	a.relayout()
+}
+
+// toggleHelp opens or closes the list of keys, and reports whether the key was
+// taken for it. A "?" with something already typed is a question mark.
+func (a *App) toggleHelp() bool {
+	a.mu.Lock()
+	if a.Host || strings.TrimSpace(a.view.Input) != "" {
+		a.mu.Unlock()
+		return false
+	}
+	a.view.Help = !a.view.Help
+	a.mu.Unlock()
+	a.repaint()
+	return true
 }
 
 // scrollRegion confines the pane's scrolling to the rows it owns, so a line
@@ -707,7 +814,11 @@ func (a *App) repaint() {
 }
 
 func (a *App) paintLocked() error {
-	_, err := io.WriteString(a.Out, a.view.Chrome())
+	out := a.view.Chrome()
+	if a.Host {
+		out = a.view.Panel() + out
+	}
+	_, err := io.WriteString(a.Out, out)
 	return err
 }
 
