@@ -97,7 +97,10 @@ type seat struct {
 	// typingUntil is when this seat's typing claim lapses. Guarded by the
 	// room's lock, because it is only ever read while building a roster.
 	typingUntil time.Time
-	out         chan []byte
+	// typingRoom is whether that claim is about writing to the room rather
+	// than to the agent.
+	typingRoom bool
+	out        chan []byte
 	// closed is shut when the seat's writer has stopped, so send never blocks
 	// on a departed joiner.
 	closed chan struct{}
@@ -198,15 +201,16 @@ func (r *room) occupied() bool {
 // It announces only when the *set* of typists changes, not on every renewal:
 // the client renews while the person keeps typing, and a repaint per keystroke
 // would be the room shouting.
-func (r *room) setTyping(s *seat, on bool) {
+func (r *room) setTyping(s *seat, on, toRoom bool) {
 	r.mu.Lock()
-	before := r.typistsLocked()
+	before, beforeRoom := r.typistsLocked(), r.chattingLocked()
 	if on {
 		s.typingUntil = time.Now().Add(TypingTTL)
+		s.typingRoom = toRoom
 	} else {
 		s.typingUntil = time.Time{}
 	}
-	changed := !sameLogins(before, r.typistsLocked())
+	changed := !sameLogins(before, r.typistsLocked()) || !sameLogins(beforeRoom, r.chattingLocked())
 	r.mu.Unlock()
 	if changed {
 		r.announce()
@@ -233,6 +237,19 @@ func (r *room) expireTyping() {
 	if lapsed {
 		r.announce()
 	}
+}
+
+// chattingLocked is the part of typistsLocked writing to the room. The caller
+// holds mu.
+func (r *room) chattingLocked() []string {
+	now := time.Now()
+	var list []string
+	for _, s := range r.seats {
+		if s.typingRoom && !s.typingUntil.IsZero() && s.typingUntil.After(now) {
+			list = append(list, s.login)
+		}
+	}
+	return dedupe(list)
 }
 
 // typistsLocked is who is composing right now. The caller holds mu.
@@ -311,7 +328,7 @@ func (r *room) announce() {
 		Thread:  r.thread,
 		Host:    r.host,
 	}
-	typists := r.typistsLocked()
+	typists, chatting := r.typistsLocked(), r.chattingLocked()
 	seats := append([]*seat(nil), r.seats...)
 	r.mu.Unlock()
 
@@ -321,6 +338,7 @@ func (r *room) announce() {
 		// Nobody is told they are typing: a client knows what its own hands
 		// are doing, and echoing it back would fight the input line.
 		record.Typing = without(typists, s.login)
+		record.Chatting = without(chatting, s.login)
 		s.sendFrame(record)
 	}
 }

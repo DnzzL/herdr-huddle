@@ -61,6 +61,9 @@ const EncodingANSI = "ansi"
 // ErrEncoding reports a payload this client cannot draw.
 var ErrEncoding = errors.New("live: unsupported frame encoding")
 
+// ToRoom is a typing claim's To for somebody writing to the room, not the agent.
+const ToRoom = "room"
+
 // Frame is one record of the stream.
 //
 // The fields are Herdr's names, and every one of them is kept: a joiner's
@@ -114,6 +117,12 @@ type Frame struct {
 	// Never includes the recipient: a client knows what its own hands are
 	// doing.
 	Typing []string `json:"typing,omitempty"`
+	// Chatting is the part of Typing who are writing to the room rather than
+	// to the agent. A subset, so a client that does not know the field still
+	// shows them as typing.
+	Chatting []string `json:"chatting,omitempty"`
+	// To says who a typing claim is for: ToRoom, or empty for the agent.
+	To string `json:"to,omitempty"`
 	// On is the claim a typing record carries: composing, or stopped.
 	On bool `json:"on,omitempty"`
 	// Fatal marks an error record that retrying cannot fix — a refusal at the

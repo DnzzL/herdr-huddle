@@ -471,7 +471,7 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			case TypeTyping:
 				// A claim about oneself only: the seat is the subject, never
 				// anything the record names.
-				huddle.setTyping(st, record.On)
+				huddle.setTyping(st, record.On, record.To == ToRoom)
 			}
 		}
 	}()
@@ -669,7 +669,7 @@ func (s *Server) speak(ctx context.Context, st *seat, login, text string) {
 	}
 	// Sending ends the sentence: leaving the claim standing would show the
 	// author as still typing what they have already sent.
-	s.room().setTyping(st, false)
+	s.room().setTyping(st, false, false)
 
 	if s.Moderate != nil {
 		// The room is told it is waiting, not that it failed: the answer is
