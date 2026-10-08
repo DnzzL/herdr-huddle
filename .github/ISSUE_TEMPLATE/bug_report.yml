@@ -1,0 +1,29 @@
+name: Bug report
+description: Something did not work
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, as host or as guest.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: herdr-huddle --version
+    validations:
+      required: true
+  - type: input
+    id: herdr
+    attributes:
+      label: herdr --version, and your OS
+  - type: markdown
+    attributes:
+      value: For a security problem, please use the private report in SECURITY.md instead.

@@ -3,6 +3,13 @@
 **Open your agent's terminal to other people. Leave a pull request behind as the
 record.**
 
+[![check](https://github.com/DnzzL/herdr-huddle/actions/workflows/check.yml/badge.svg)](https://github.com/DnzzL/herdr-huddle/actions/workflows/check.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8.svg)](go.mod)
+
+> **Early.** It works end to end for you and one person you trust. What is and
+> is not proven is listed under [Status](#status) — read it before you rely on it.
+
 ```
  pi · ~/Projects/demo
    ▸ Read internal/live/server.go
@@ -27,42 +34,28 @@ meant to steer the agent even from people who never open a terminal. The agent
 stays in your terminal, under your control, and nothing is ever typed into your
 pane.
 
-## Where this actually is
+## Install
 
-Honest status, because the difference matters before you rely on it.
+| You are | Do this |
+|---------|---------|
+| **The host**, with an agent in a [Herdr](https://herdr.dev) pane (0.9.0+, Linux or macOS) | `herdr plugin install DnzzL/herdr-huddle` |
+| **A guest**, joining somebody's huddle — no Herdr, no agent | Download the binary from [Releases](https://github.com/DnzzL/herdr-huddle/releases), or `go install github.com/DnzzL/herdr-huddle/cmd/herdr-huddle@latest` |
+| **Hacking on it** (Go 1.26+) | `make build` → `bin/herdr-huddle` |
 
-**Proven end to end**, against real sockets, real terminals and a real pull
-request:
+Check what you have with `herdr-huddle --version`.
 
-- The live huddle — `serve` and `join`, the room, per-joiner viewports, resize,
-  the door, room chat, moderated steering, reconnect across a server restart.
-- The outbound record: transcript comments really were posted to a real pull
-  request.
-- Instruction records a failing GitHub would not take survive a `serve`
-  restart: they are written down per share and carried over.
-- **Steering, both ways in.** A `/agent` comment written on a real pull request
-  was read by the poller and delivered into a live Claude Code agent, which
-  answered it — and the live path (`serve`'s own call) reached the same agent
-  directly. The prompt arrives with its wrapper intact: the author's login, and
-  the "colleague's message, not from your operator" framing.
+### Joining a huddle
 
-**Not proven yet**, and each one is a thing a second person would hit:
+You were sent a link. A GitHub token proves who you are, and the host lets you
+in with one keypress:
 
-- **`--invite` has been measured once**, against a login that already had
-  access. Whether a work org permits the collaborator invitation at all is
-  unknown.
-- **Tokens expire (GitHub issues 8-hour ones) and nothing refreshes them.** When
-  yours dies, `poll` stops recording and `join` stops working until you run
-  `auth login` again. Observed again on 2026-09-27: the stored token answered
-  `401: Bad credentials` and everything GitHub-side stopped until `GH_TOKEN` was
-  supplied instead.
-- **A refused or held instruction has never run against the real API.** The
-  delivery that was measured succeeded, so the 👀 acknowledgement and the
-  "waiting on the operator" notice are still fakes-only.
+```
+export GH_TOKEN=$(gh auth token)      # or: herdr-huddle auth login
+herdr-huddle join https://k3f9x1.trycloudflare.com
+```
 
-So: fine for you and one person you trust, with steering proven in both
-directions. Still not fine for handing to somebody whose access depends on
-`--invite` working, or for a session long enough to outlive a GitHub token.
+`Ctrl-T` switches the line between the agent and the room, `?` lists every key,
+`Ctrl-C` leaves.
 
 ## How it works
 
@@ -304,6 +297,7 @@ invitation. Watching the agent live is the one thing that needs a client.
 ## Commands
 
 ```
+herdr-huddle --version
 herdr-huddle auth login [--repo owner/name] [--public]
 herdr-huddle auth status
 herdr-huddle auth logout
@@ -346,9 +340,9 @@ only you can answer, at your terminal. Herdr refuses a prompt to a blocked agent
 outright and this tool does not try; it posts a comment saying the agent is
 waiting, so your collaborator is not left guessing.
 
-**The unproven paths are listed at the top**, under "Where this actually is" —
-the inbound `/agent` comment, `--invite`, live steering against a real agent,
-and the in-memory record queue. `## Known gaps` in each ADR carries the detail.
+**The unproven paths are listed under [Status](#status)** —
+`--invite`, token expiry, and the refused and held instruction paths.
+`## Known gaps` in each ADR carries the detail.
 
 <details>
 <summary><b>More limits, in detail</b> — GitHub's constraints, the record, the stream, the TUI</summary>
@@ -411,6 +405,43 @@ and the in-memory record queue. `## Known gaps` in each ADR carries the detail.
 
 </details>
 
+## Status
+
+Honest status, because the difference matters before you rely on it.
+
+**Proven end to end**, against real sockets, real terminals and a real pull
+request:
+
+- The live huddle — `serve` and `join`, the room, per-joiner viewports, resize,
+  the door, room chat, moderated steering, reconnect across a server restart.
+- The outbound record: transcript comments really were posted to a real pull
+  request.
+- Instruction records a failing GitHub would not take survive a `serve`
+  restart: they are written down per share and carried over.
+- **Steering, both ways in.** A `/agent` comment written on a real pull request
+  was read by the poller and delivered into a live Claude Code agent, which
+  answered it — and the live path (`serve`'s own call) reached the same agent
+  directly. The prompt arrives with its wrapper intact: the author's login, and
+  the "colleague's message, not from your operator" framing.
+
+**Not proven yet**, and each one is a thing a second person would hit:
+
+- **`--invite` has been measured once**, against a login that already had
+  access. Whether a work org permits the collaborator invitation at all is
+  unknown.
+- **Tokens expire (GitHub issues 8-hour ones) and nothing refreshes them.** When
+  yours dies, `poll` stops recording and `join` stops working until you run
+  `auth login` again. Observed again on 2026-09-27: the stored token answered
+  `401: Bad credentials` and everything GitHub-side stopped until `GH_TOKEN` was
+  supplied instead.
+- **A refused or held instruction has never run against the real API.** The
+  delivery that was measured succeeded, so the 👀 acknowledgement and the
+  "waiting on the operator" notice are still fakes-only.
+
+So: fine for you and one person you trust, with steering proven in both
+directions. Still not fine for handing to somebody whose access depends on
+`--invite` working, or for a session long enough to outlive a GitHub token.
+
 ## Development
 
 ```
@@ -437,10 +468,19 @@ Every decision, with the alternatives it rejected, is in
 | [005](docs/adr/ADR-005-live-multiplayer.md) | Multiplayer as a live stream, with GitHub as the ledger |
 | [006](docs/adr/ADR-006-quick-tunnel-door.md) | The door: quick tunnel, WebSocket, pairing as the gate |
 | [007](docs/adr/ADR-007-the-huddle-room.md) | The stream becomes a room: knock to join, a viewport each |
+| [008](docs/adr/ADR-008-two-channels-two-decisions-and-a-huddle-that-survives.md) | Two channels, two decisions, and a huddle that survives |
+| [009](docs/adr/ADR-009-une-action-herdr-comme-second-point-d-entree.md) | A Herdr action as a second entry point |
+| [010](docs/adr/ADR-010-the-host-is-a-seat.md) | The host is a seat in their own room |
 
 The vocabulary this is all written in is in [`CONTEXT.md`](CONTEXT.md).
 
-## Licence
+## Contributing
+
+Small, focused changes are the easiest to merge: see
+[CONTRIBUTING.md](CONTRIBUTING.md). A security problem goes through
+[SECURITY.md](SECURITY.md), not a public issue.
+
+## License
 
 [Apache License 2.0](LICENSE) — permissive, with an express patent grant.
 
