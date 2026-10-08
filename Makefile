@@ -4,6 +4,10 @@ CLIENT_ID ?=
 
 BIN      := bin/herdr-huddle
 LDFLAGS  := -s -w
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null)
+ifneq ($(VERSION),)
+LDFLAGS  += -X main.version=$(VERSION)
+endif
 ifneq ($(CLIENT_ID),)
 LDFLAGS  += -X main.clientID=$(CLIENT_ID)
 endif

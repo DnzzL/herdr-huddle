@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,46 @@ import (
 // It is not a secret. In the device flow the client id is public by design —
 // that is exactly why this flow was chosen over one needing a client secret.
 var clientID string
+
+// version is the release this binary was built from, injected like clientID:
+//
+//	go build -ldflags "-X main.version=v0.1.0"
+//
+// Left empty, buildVersion falls back on what the Go toolchain recorded.
+var version string
+
+// buildVersion names this build for a bug report: the injected release, else
+// the commit it was built from, else "dev".
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	var rev, dirty string
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			rev = setting.Value
+			if len(rev) > 7 {
+				rev = rev[:7]
+			}
+		case "vcs.modified":
+			if setting.Value == "true" {
+				dirty = "+dirty"
+			}
+		}
+	}
+	switch {
+	case rev != "":
+		return rev + dirty
+	case info.Main.Version != "" && info.Main.Version != "(devel)":
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 const (
 	serviceName = "herdr-huddle"
@@ -99,6 +140,9 @@ func run(args []string) error {
 		return runServe(args[1:])
 	case "join":
 		return runJoin(args[1:])
+	case "version", "--version", "-v":
+		fmt.Println("herdr-huddle " + buildVersion())
+		return nil
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -112,6 +156,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `herdr-huddle — a GitHub draft PR as the shared thread for an agent session
 
 Usage:
+  herdr-huddle --version
   herdr-huddle auth login [--repo owner/name] [--public]
   herdr-huddle auth status
   herdr-huddle auth logout

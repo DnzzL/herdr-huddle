@@ -1116,3 +1116,25 @@ func TestHostCommandSurvivesAShell(t *testing.T) {
 		t.Errorf("hostCommand =\n %s\nwant\n %s", got, want)
 	}
 }
+
+// A bug report has to say which build it came from.
+func TestBuildVersionPrefersTheInjectedOne(t *testing.T) {
+	old := version
+	t.Cleanup(func() { version = old })
+	version = "v1.2.3"
+	if got := buildVersion(); got != "v1.2.3" {
+		t.Errorf("buildVersion = %q, want the injected version", got)
+	}
+	version = ""
+	if got := buildVersion(); got == "" {
+		t.Error("an unversioned build must still say something")
+	}
+}
+
+func TestVersionFlagNeedsNothingElse(t *testing.T) {
+	for _, arg := range []string{"--version", "version", "-v"} {
+		if err := run([]string{arg}); err != nil {
+			t.Errorf("run(%q) = %v, want it to succeed", arg, err)
+		}
+	}
+}
