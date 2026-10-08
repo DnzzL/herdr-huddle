@@ -1106,3 +1106,13 @@ func TestPrintShareResultNeverClaimsWhatDidNotHappen(t *testing.T) {
 		t.Errorf("a resumed share must still read as reused:\n%s", got)
 	}
 }
+
+// The command typed into the new pane goes through a shell, so whatever is in
+// a path or a flag value has to reach `serve` as itself.
+func TestHostCommandSurvivesAShell(t *testing.T) {
+	got := hostCommand("/home/o'brien/my tools/herdr-huddle", "wQ:p1", []string{"--moderated=true", "--addr=127.0.0.1:8787"})
+	want := `'/home/o'\''brien/my tools/herdr-huddle' serve '--pane=wQ:p1' '--moderated=true' '--addr=127.0.0.1:8787'`
+	if got != want {
+		t.Errorf("hostCommand =\n %s\nwant\n %s", got, want)
+	}
+}

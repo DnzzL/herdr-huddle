@@ -133,9 +133,9 @@ first if you already have one.
 Or, once the plugin is linked, from Herdr itself: the plugin adds two actions,
 **ouvrir le fil de ce projet** and **ouvrir le huddle sur ce pane**. An action
 knows which pane has focus and which project it works in, so it does not depend
-on where your shell happens to be — and the huddle's join line arrives as a
-Herdr notification, because an action's output only ever reaches
-`herdr plugin log`.
+on where your shell happens to be. The huddle action opens your room in a pane
+beside the agent's (`serve --split`), because an action's output only ever
+reaches `herdr plugin log`.
 
 That is the thread. `--invite @user` is optional — it gives someone repository
 read access and puts them on the allowlist ahead of time, which is useful for a

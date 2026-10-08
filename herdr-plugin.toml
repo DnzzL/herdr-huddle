@@ -36,11 +36,12 @@ contexts = ["workspace"]
 command = ["bin/herdr-huddle", "share"]
 platforms = ["linux", "macos"]
 
-# --notify parce que la sortie d'une action ne va qu'au journal du plugin :
-# sans lui, le lien de jointure n'atteindrait personne.
+# --split parce que la sortie d'une action ne va qu'au journal du plugin :
+# la salle s'ouvre dans un pane à côté de l'agent, où le lien de jointure et
+# la conversation sont sous les yeux (ADR-010).
 [[actions]]
 id = "huddle"
 title = "Herdr Huddle: ouvrir le huddle sur ce pane"
 contexts = ["workspace"]
-command = ["bin/herdr-huddle", "serve", "--notify"]
+command = ["bin/herdr-huddle", "serve", "--split"]
 platforms = ["linux", "macos"]

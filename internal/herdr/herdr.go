@@ -401,3 +401,37 @@ func (c *Client) Notify(ctx context.Context, title, body, sound string) error {
 	_, err := c.call(ctx, args...)
 	return err
 }
+
+// Split opens a new pane to the right of one, without moving the keyboard to
+// it, and returns the new pane's id.
+//
+// It exists so the huddle can sit beside the agent it is about: the operator
+// works in one pane and reads the room in the other, and a room in a pane
+// nobody is looking at is a room nobody is in.
+func (c *Client) Split(ctx context.Context, pane string) (string, error) {
+	out, err := c.call(ctx, "pane", "split", pane, "--direction", "right", "--no-focus")
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Result struct {
+			Pane struct {
+				ID string `json:"pane_id"`
+			} `json:"pane"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return "", fmt.Errorf("herdr: parse pane split: %w", err)
+	}
+	if resp.Result.Pane.ID == "" {
+		return "", errors.New("herdr: pane split named no new pane")
+	}
+	return resp.Result.Pane.ID, nil
+}
+
+// RunIn types a shell command into a pane and runs it. The pane's shell stays
+// alive behind the command, so a failure is still on screen to be read.
+func (c *Client) RunIn(ctx context.Context, pane, command string) error {
+	_, err := c.call(ctx, "pane", "run", pane, command)
+	return err
+}

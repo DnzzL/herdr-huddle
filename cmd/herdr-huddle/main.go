@@ -117,7 +117,7 @@ Usage:
   herdr-huddle auth logout
   herdr-huddle share [--slug name] [--base ref] [--invite @user]... [--dry-run]
   herdr-huddle poll [--once] [--interval 10s]
-  herdr-huddle serve [--pane id] [--open|--closed] [--moderated] [--plain] [--no-tunnel] [--addr host:port]
+  herdr-huddle serve [--pane id] [--open|--closed] [--moderated] [--split] [--plain] [--no-tunnel] [--addr host:port]
   herdr-huddle join [address] [--addr 127.0.0.1:8787]
 
 Auth:
@@ -171,6 +171,9 @@ Serve and join:
            --notify      announce the join line as a Herdr notification. For
                          the plugin action, whose output only reaches
                          herdr plugin log.
+           --split       open the huddle in a new pane beside the agent's and
+                         run it there, so you read the room while you work.
+                         The plugin action does this.
            --plain       print log lines instead of drawing your room. In a
                          terminal serve draws it by default: who is here, who
                          is typing, the chat, and the questions you answer
@@ -553,6 +556,7 @@ func runServe(args []string) error {
 	closed := fs.Bool("closed", false, "the allowlist or nothing: never ask, never knock")
 	moderated := fs.Bool("moderated", false, "approve every instruction before it reaches the agent")
 	notify := fs.Bool("notify", false, "announce the join line as a Herdr notification (for a plugin action, whose output nobody sees)")
+	split := fs.Bool("split", false, "open the huddle in a new pane beside the agent's, and run there")
 	plain := fs.Bool("plain", false, "print log lines instead of drawing the host's room (the default when there is a terminal)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
@@ -578,6 +582,9 @@ func runServe(args []string) error {
 	state, err := shareForServe(shareStore(), *pane, invokedFrom)
 	if err != nil {
 		return err
+	}
+	if *split {
+		return serveBesideTheAgent(ctx, fs, state.Origin.PaneID)
 	}
 
 	ln, err := net.Listen("tcp", *addr)
@@ -698,6 +705,55 @@ func runServe(args []string) error {
 	}
 	return runErr
 }
+
+// serveBesideTheAgent opens the host's room in a new pane next to the agent's
+// and runs `serve` there, so the chat and the typing marks are on screen while
+// the operator works in the agent's pane.
+//
+// It hands over every flag the caller set, as it was set, rather than
+// rebuilding the command from the ones it knows: a new flag then works in a
+// split without anybody remembering to add it here.
+func serveBesideTheAgent(ctx context.Context, fs *flag.FlagSet, agentPane string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("could not find this binary to run in the new pane: %w", err)
+	}
+	var flags []string
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "split", "pane", "notify": // the pane is named below; the room shows the join line itself
+		default:
+			flags = append(flags, "--"+f.Name+"="+f.Value.String())
+		}
+	})
+
+	client := &herdr.Client{}
+	room, err := client.Split(ctx, agentPane)
+	if err != nil {
+		return fmt.Errorf("could not open a pane beside %s: %w", agentPane, err)
+	}
+	if err := client.RunIn(ctx, room, hostCommand(exe, agentPane, flags)); err != nil {
+		return fmt.Errorf("opened pane %s but could not run the huddle in it: %w", room, err)
+	}
+	fmt.Fprintf(os.Stderr, "herdr-huddle: the huddle is open in pane %s, beside %s\n", room, agentPane)
+	return nil
+}
+
+// hostCommand is the shell line that runs `serve` for one pane. Every word is
+// quoted, because the line is typed into a shell and the executable's path and
+// the flag values are not ours to trust.
+func hostCommand(exe, agentPane string, flags []string) string {
+	words := append([]string{exe, "serve", "--pane=" + agentPane}, flags...)
+	for i, w := range words {
+		if i == 1 {
+			continue // the subcommand is ours and needs no quotes
+		}
+		words[i] = shellQuote(w)
+	}
+	return strings.Join(words, " ")
+}
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // threadLedger is the record half of steering: delivered instructions are
 // posted to the pull request with the operator's token.

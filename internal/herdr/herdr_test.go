@@ -537,3 +537,42 @@ func TestNotifyRefusesAnEmptyTitle(t *testing.T) {
 		t.Errorf("ran %v, want nothing", runner.calls)
 	}
 }
+
+// Opening the huddle beside the agent is two calls: make the pane, then say
+// what runs in it. The new pane's id is the only thing the first one returns
+// that the second needs — it is measured from a live `herdr pane split` on
+// 0.9.0, not guessed.
+func TestSplitReturnsTheNewPane(t *testing.T) {
+	runner := &fakeRunner{stdout: `{"id":"cli:pane:split","result":{"pane":{"pane_id":"wQ:pE","tab_id":"wQ:t1"},"type":"pane_info"}}`}
+	got, err := newTestClient(runner).Split(context.Background(), "wQ:p1")
+	if err != nil {
+		t.Fatalf("Split errored: %v", err)
+	}
+	if got != "wQ:pE" {
+		t.Errorf("Split = %q, want the new pane", got)
+	}
+	// Without --no-focus the operator's keyboard would jump out of the agent's
+	// pane into the one they have only just asked for.
+	want := []string{"herdr", "pane", "split", "wQ:p1", "--direction", "right", "--no-focus"}
+	if !reflect.DeepEqual(runner.lastArgs(), want) {
+		t.Errorf("ran %v,\n want %v", runner.lastArgs(), want)
+	}
+}
+
+func TestSplitRefusesAResponseWithNoPane(t *testing.T) {
+	runner := &fakeRunner{stdout: `{"id":"cli:pane:split","result":{"type":"ok"}}`}
+	if _, err := newTestClient(runner).Split(context.Background(), "wQ:p1"); err == nil {
+		t.Error("a split that names no pane must be an error, or the command would run nowhere")
+	}
+}
+
+func TestRunInTypesTheCommandIntoThePane(t *testing.T) {
+	runner := &fakeRunner{}
+	if err := newTestClient(runner).RunIn(context.Background(), "wQ:pE", "herdr-huddle serve"); err != nil {
+		t.Fatalf("RunIn errored: %v", err)
+	}
+	want := []string{"herdr", "pane", "run", "wQ:pE", "herdr-huddle serve"}
+	if !reflect.DeepEqual(runner.lastArgs(), want) {
+		t.Errorf("ran %v,\n want %v", runner.lastArgs(), want)
+	}
+}
