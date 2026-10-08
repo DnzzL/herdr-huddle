@@ -1,11 +1,16 @@
 # herdr-huddle
 
-**Open your agent's terminal to other people. Leave a pull request behind as the
-record.**
+**Live Share for your coding agent.** Open a [Herdr](https://herdr.dev) pane to a
+teammate: they watch the agent work in their own terminal, type to steer it, and
+a pull request keeps the record.
 
 [![check](https://github.com/DnzzL/herdr-huddle/actions/workflows/check.yml/badge.svg)](https://github.com/DnzzL/herdr-huddle/actions/workflows/check.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8.svg)](go.mod)
+
+```
+herdr plugin install DnzzL/herdr-huddle
+```
 
 > **Early.** It works end to end for you and one person you trust. What is and
 > is not proven is listed under [Status](#status) — read it before you rely on it.
@@ -22,17 +27,26 @@ record.**
 agent › also update the README▏
 ```
 
-You run a coding agent in a Herdr pane. `herdr-huddle` turns it into a room: one
-link, sent to whoever you want in. They run one binary and watch the agent work —
-live, in their own terminal, at their own size — and type to steer it. Every
-instruction reaches the agent immediately and lands on a pull request afterwards,
-attributed.
+## Why
 
-The pull request is the artifact. The agent's turns arrive as comments, so does
-every instruction anyone gave live, and a comment beginning with `/agent` is
-meant to steer the agent even from people who never open a terminal. The agent
-stays in your terminal, under your control, and nothing is ever typed into your
-pane.
+Pairing on an agent session today means a screen share, or pasting transcripts
+into a chat. The agent is in *your* terminal, with *your* permissions, and the
+person who could unblock it is somewhere else.
+
+- **They see what you see, at their own size.** One link, one binary, no Herdr
+  and no agent on their side. Each guest gets their own stream, painted for
+  their own terminal.
+- **They can steer, and you stay in control.** Every instruction reaches the
+  agent as a colleague's message carrying their login, you answer the door with
+  one keypress, and `--moderated` puts each instruction to you first. Nothing is
+  ever typed into your pane.
+- **A pull request is left behind.** The agent's turns arrive as comments, so
+  does every instruction anyone gave, attributed. A comment starting with
+  `/agent` steers it even from people who never open a terminal.
+
+Inspired by VS Code Live Share, and built on Herdr's own building blocks — panes,
+`herdr agent prompt`, `herdr terminal session observe` and plugin actions — so
+there is nothing to host and nothing to sign up for beyond GitHub.
 
 ## Install
 
