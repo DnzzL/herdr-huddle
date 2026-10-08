@@ -4,7 +4,7 @@
 # skip themselves outside a pane and without a token, and everything that
 # writes to a repository is tested against a local bare repo. So this needs no
 # secrets and no services.
-name: check
+name: CI
 
 on:
   push:

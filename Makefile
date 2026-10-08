@@ -22,7 +22,7 @@ test:
 
 # What CI would run, and what to run before committing.
 check:
-	gofmt -l .
+	test -z "$$(gofmt -l .)"
 	go vet ./...
 	go test -race -count=1 ./...
 

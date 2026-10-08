@@ -1,26 +1,65 @@
-# Pushing a tag like v0.1.0 builds the binaries guests download, with the
-# version baked in, and attaches them to a GitHub release.
-name: release
+# Pushing a tag like v0.1.0 builds the binaries guests download and the plugin's
+# install step fetches, with the version baked in, and attaches them to a release.
+name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  binaries:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          args: release --clean
+
+      - name: Build binaries
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+              -o "dist/herdr-huddle_${os}_${arch}" ./cmd/herdr-huddle
+          done
+          cd dist && sha256sum herdr-huddle_* > checksums.txt
+
+      # The CHANGELOG is written for someone using the plugin; a generated
+      # list of commit subjects is not. Fall back to one only if this tag has
+      # no section, which means somebody forgot.
+      - name: Extract the release notes
+        id: notes
+        run: |
+          awk -v tag="## ${GITHUB_REF_NAME} " '
+            index($0, tag) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found && !seen && /^[[:space:]]*$/ { next }
+            found { seen = 1; print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if [ -s /tmp/notes.md ]; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::no CHANGELOG.md section for ${GITHUB_REF_NAME}"
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
+              gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --title "$GITHUB_REF_NAME" --notes-file /tmp/notes.md
+            else
+              gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
